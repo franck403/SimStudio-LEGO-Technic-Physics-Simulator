@@ -1147,6 +1147,9 @@ export default function Home() {
   const [reference, setReference] = useState("");
   const [results, setResults] = useState<CatalogPart[]>([]);
   const [imported, setImported] = useState<CatalogPart[]>([]);
+  // Exact "find part by ID" result. null = normal palette/search view.
+  const [idQuery, setIdQuery] = useState("");
+  const [idResults, setIdResults] = useState<CatalogPart[] | null>(null);
   const [, setCatalogBusy] = useState(false);
   const [message, setMessage] = useState("catalog-ready");
 
@@ -1665,17 +1668,40 @@ export default function Home() {
   }, [projectName]);
 
   useEffect(() => {
-    const source =
+    const query = search.trim().toLowerCase();
+    setCatalogBusy(false);
+    if (!query) {
+      setResults(
         category === "imported"
           ? imported
           : paletteParts.filter((p) => p.family === category),
-      query = search.trim().toLowerCase();
-    setCatalogBusy(false);
-    setResults(
-      query
-        ? source.filter((p) => (p.part + " " + p.name).toLowerCase().includes(query))
-        : source,
-    );
+      );
+      return;
+    }
+    // A non-empty search looks through every category (and imported parts),
+    // never only the active tab, and only returns parts that really match.
+    const alias = resolvePaletteRequest(query),
+      words = query.split(/\s+/).filter(Boolean),
+      rank = (p: CatalogPart) => {
+        const ids = [p.part, p.modelPart, p.resolvedPart, p.requestedPart]
+          .filter(Boolean)
+          .map((value) => value!.toLowerCase());
+        if (ids.includes(query) || ids.includes(alias)) return 0;
+        if (ids.some((id) => id.startsWith(query))) return 1;
+        if (ids.some((id) => id.includes(query))) return 2;
+        const haystack = `${ids.join(" ")} ${p.name.toLowerCase()}`;
+        return words.every((word) => haystack.includes(word)) ? 3 : -1;
+      },
+      seen = new Set<string>(),
+      matches: { part: CatalogPart; rank: number }[] = [];
+    for (const part of [...paletteParts, ...imported]) {
+      const key = `${part.part}-${part.color}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const r = rank(part);
+      if (r >= 0) matches.push({ part, rank: r });
+    }
+    setResults(matches.sort((a, b) => a.rank - b.rank).map((m) => m.part));
   }, [category, search, imported]);
 
   useEffect(() => {
@@ -9495,15 +9521,8 @@ export default function Home() {
   }, [theme]);
 
   const visible = useMemo(
-    () =>
-      category === "imported" && search
-        ? results.filter(
-            (p) =>
-              !p.paletteHidden &&
-              (p.part + " " + p.name).toLowerCase().includes(search.toLowerCase()),
-          )
-        : results.filter((p) => !p.paletteHidden),
-    [category, results, search],
+    () => idResults ?? results.filter((p) => !p.paletteHidden),
+    [idResults, results],
   );
 
   const dragPart = (e: React.DragEvent, p: CatalogPart) => {
@@ -9573,6 +9592,64 @@ export default function Home() {
     setReference("");
     setCatalogBusy(false);
     void appRef.current?.preloadPart(found);
+  };
+
+  // Exact lookup by part number: shows ONLY that part (never a category).
+  // Local palette first, then the LDraw catalog; unknown IDs show nothing.
+  const lookupById = async () => {
+    const part = idQuery.trim().replace(/\.dat$/i, "");
+    if (!part) return;
+    setCatalogBusy(true);
+    const normalizedPart = part.toLowerCase(),
+      palettePart = resolvePaletteRequest(normalizedPart),
+      packaged = paletteParts.find(
+        (candidate) =>
+          candidate.part.toLowerCase() === palettePart ||
+          candidate.modelPart?.toLowerCase() === palettePart,
+      );
+    let found: CatalogPart | undefined = packaged
+      ? {
+          ...packaged,
+          origin: "catalog-search",
+          sourceKind: packaged.geometry ? "packaged-cache" : "ldraw-network",
+          requestedPart: part,
+          catalogReturnedPart: packaged.part,
+          resolvedPart: packaged.modelPart ?? packaged.part,
+          catalogQuery: part,
+        }
+      : undefined;
+    if (!found)
+      try {
+        const d = (await fetch(`/api/parts?q=${encodeURIComponent(part)}`).then((r) =>
+          r.json(),
+        )) as { items?: CatalogPart[] };
+        const exact = d.items?.find((x) => x.part.toLowerCase() === normalizedPart);
+        if (exact)
+          found = {
+            ...exact,
+            kind: kindFor("", exact.name),
+            color: exact.color ?? 71,
+            origin: "catalog-search",
+            sourceKind: exact.geometry ? "packaged-cache" : "external-catalog",
+            requestedPart: part,
+            catalogReturnedPart: exact.part,
+            resolvedPart: exact.modelPart ?? exact.part,
+            catalogQuery: part,
+          };
+      } catch {}
+    setCatalogBusy(false);
+    setSearch("");
+    if (!found) {
+      setIdResults([]);
+      return;
+    }
+    const result = found;
+    if (!belongsToDefaultPalette(result))
+      setImported((old) =>
+        old.some((x) => x.part === result.part) ? old : [result, ...old],
+      );
+    setIdResults([result]);
+    void appRef.current?.preloadPart(result);
   };
 
   const rotate = (axis: "x" | "y" | "z", dir = 1) => {
@@ -13028,18 +13105,36 @@ export default function Home() {
           <span>⌕</span>
           <input
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(e) => {
+              setSearch(e.target.value);
+              setIdResults(null);
+            }}
             placeholder={t.search}
           />
+        </div>
+        <div className="reference-box">
+          <b>{t.findById}</b>
+          <div>
+            <input
+              value={idQuery}
+              onChange={(e) => setIdQuery(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && void lookupById()}
+              placeholder="Ej. 32524"
+            />
+            <button onClick={() => void lookupById()}>⌕</button>
+          </div>
         </div>
         <div className="category-tabs">
           {categories.map((c) => (
             <button
               key={c.id}
-              className={category === c.id ? "active" : ""}
+              className={
+                category === c.id && !search.trim() && !idResults ? "active" : ""
+              }
               onClick={() => {
                 setCategory(c.id);
                 setSearch("");
+                setIdResults(null);
               }}
             >
               <i>{c.icon}</i>
@@ -13060,8 +13155,26 @@ export default function Home() {
           </div>
         </div>
         <div className="catalog-head">
-          <b>{t.categories[categories.find((c) => c.id === category)?.id ?? "beams"]}</b>
-          <span>{`${visible.length} ${t.pieces}`}</span>
+          <b>
+            {idResults
+              ? `${t.idLabel} ${idQuery.trim()}`
+              : search.trim()
+                ? `${t.searchLabel}: ${search.trim()}`
+                : t.categories[categories.find((c) => c.id === category)?.id ?? "beams"]}
+          </b>
+          <span>
+            {idResults && (
+              <button
+                type="button"
+                className="clear-id-result"
+                onClick={() => setIdResults(null)}
+                title="✕"
+              >
+                ✕
+              </button>
+            )}{" "}
+            {`${visible.length} ${t.pieces}`}
+          </span>
         </div>
         <div className="parts-grid">
           {visible.map((p) => (
@@ -13138,7 +13251,11 @@ export default function Home() {
             </article>
           ))}
         </div>
-        {!visible.length && <div className="no-results">{t.noResults}</div>}
+        {!visible.length && (
+          <div className="no-results">
+            {idResults ? `${t.idNotFound} ${idQuery.trim()}` : t.noResults}
+          </div>
+        )}
         <div className="drag-help">{t.dragHelp}</div>
       </aside>
       <section className="viewport" ref={mountRef}>
