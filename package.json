@@ -6,7 +6,7 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "dev": "vinext dev",
+    "dev": "vinext dev -p 3000 -H 0.0.0.0",
     "build": "vinext build",
     "build:pages": "vite build --config vite.pages.config.ts",
     "physics:build": "node scripts/build-physics-wasm.mjs",

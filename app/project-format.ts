@@ -54,6 +54,7 @@ export type SavedCollisionPrimitive = {
 export type SavedPiece = {
   mapProvenance?: MapProvenanceSnapshot;
   id: string;
+  part?: string;
   catalog: JsonObject;
   asset: string;
   position: [number, number, number];
@@ -367,10 +368,17 @@ const sanitizeProjectDocument = (
         },
         scale = finiteTuple3(piece.scale, [1, 1, 1]).map((component) =>
           Math.abs(component) < 1e-6 ? 1 : component,
-        ) as [number, number, number];
+        ) as [number, number, number],
+        part =
+          typeof piece.part === "string" && piece.part
+            ? piece.part
+            : typeof (piece.catalog as any)?.part === "string"
+              ? ((piece.catalog as any).part as string)
+              : "";
       return {
         id:
           typeof piece.id === "string" && piece.id ? piece.id : `piece-${pieceIndex + 1}`,
+        part,
         catalog: piece.catalog && typeof piece.catalog === "object" ? piece.catalog : {},
         asset: typeof piece.asset === "string" ? piece.asset : "",
         position: finiteTuple3(piece.position),
@@ -655,19 +663,15 @@ export function validateProjectDocument(value: unknown): SimStudioProjectDocumen
   if (!value || typeof value !== "object")
     throw new Error("The file does not contain a Sim Studio project.");
   const document = value as Partial<SimStudioProjectDocument>;
-  if (document.format !== PROJECT_FORMAT)
-    throw new Error("This is not a .simstudio project file.");
-  if (document.version !== PROJECT_VERSION)
-    throw new Error(`Unsupported project version: ${String(document.version)}.`);
   if (
-    typeof document.id !== "string" ||
-    typeof document.name !== "string" ||
-    !Array.isArray(document.pieces) ||
-    !Array.isArray(document.connections) ||
-    !document.assets ||
-    !document.camera ||
-    !document.settings
+    document.format &&
+    typeof document.format === "string" &&
+    !document.format.toLowerCase().includes("sim")
   )
+    throw new Error("This is not a recognized Sim Studio project file.");
+  if (document.version && typeof document.version === "number" && document.version < 1)
+    throw new Error(`Unsupported project version: ${String(document.version)}.`);
+  if (!Array.isArray(document.pieces))
     throw new Error("The Sim Studio project is incomplete or damaged.");
   return sanitizeProjectDocument(document);
 }
@@ -685,10 +689,16 @@ export function decodeProjectFile(source: ArrayBuffer | Uint8Array) {
   const hasMagic =
     bytes.length > FILE_MAGIC.length &&
     FILE_MAGIC.every((value, index) => bytes[index] === value);
-  const text = hasMagic
-    ? strFromU8(gunzipSync(bytes.subarray(FILE_MAGIC.length)))
-    : strFromU8(bytes);
-  return validateProjectDocument(JSON.parse(text));
+  let text: string;
+  if (hasMagic) {
+    text = strFromU8(gunzipSync(bytes.subarray(FILE_MAGIC.length)));
+  } else if (bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b) {
+    text = strFromU8(gunzipSync(bytes));
+  } else {
+    text = strFromU8(bytes);
+  }
+  const clean = text.replace(/^\uFEFF/, "").trim();
+  return validateProjectDocument(JSON.parse(clean));
 }
 
 export function safeProjectFileName(name: string) {

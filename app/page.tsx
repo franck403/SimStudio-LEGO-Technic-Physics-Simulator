@@ -703,8 +703,12 @@ const connectorMapReach = (connectors: MeshConnector[]) =>
     ),
   );
 
-const connectorDefaultsForPart = (part: string, connectors: MeshConnector[]) => {
-  if (part.toLowerCase().replace(/\.dat$/, "") !== "4159") return connectors;
+const connectorDefaultsForPart = (
+  part: string | undefined | null,
+  connectors: MeshConnector[],
+) => {
+  if (!part || typeof part !== "string" || part.toLowerCase().replace(/\.dat$/, "") !== "4159")
+    return connectors;
   return connectors.map((connector) =>
     connector.kind === "axle" &&
     connector.role === "socket" &&
@@ -1159,9 +1163,9 @@ export default function Home() {
   );
   const [gpuPrototypeError, setGpuPrototypeError] = useState("");
   const [gpuPreviewRunning, setGpuPreviewRunning] = useState(false);
-  const [viewportRenderer, setViewportRenderer] = useState<"WebGPU" | "WebGL">("WebGL");
+  const [viewportRenderer, setViewportRenderer] = useState<"WebGPU" | "WebGL">("WebGPU");
   const [rendererPreference, setRendererPreference] =
-    useState<ViewportRendererPreference>("auto");
+    useState<ViewportRendererPreference>("webgpu");
   const rendererPreferenceRef = useRef(rendererPreference);
   const rendererPreferenceInitializedRef = useRef(false);
   rendererPreferenceRef.current = rendererPreference;
@@ -1176,6 +1180,7 @@ export default function Home() {
   const [collisionLayer, setCollisionLayer] = useState<"normal" | "gear">("normal");
   const [mapUpdates, setMapUpdates] = useState<MapUpdateCandidate[]>([]);
   const [mapUpdatesOpen, setMapUpdatesOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // Placement, snapping and pending import controls.
   const [rotationAngle, setRotationAngle] = useState(15);
@@ -1865,14 +1870,23 @@ export default function Home() {
             },
           );
         }),
+      fileMapPromise = typeof window !== "undefined"
+        ? fetch("/ldraw/file-map.json")
+            .then((r) => (r.ok ? r.json() : null))
+            .catch(() => null)
+        : Promise.resolve(null),
       makeLoader = (base: string) => {
         const instance = new LDrawLoader();
         instance.setConditionalLineMaterial(LDrawConditionalLineMaterial);
         instance.setPartsLibraryPath(base);
+        void fileMapPromise.then((map) => {
+          if (map) instance.setFileMap(map);
+        });
+        const configUrl = typeof window !== "undefined" ? "/ldraw/LDConfig.ldr" : base + "LDConfig.ldr";
         const materials = withTimeout(
-          instance.preloadMaterials(base + "LDConfig.ldr"),
+          instance.preloadMaterials(configUrl).catch(() => instance.preloadMaterials(base + "LDConfig.ldr")),
           10_000,
-          "La paleta de materiales LDraw",
+          "LDraw materials palette",
         ).catch(() => undefined);
         return { instance, materials };
       },
@@ -1887,7 +1901,7 @@ export default function Home() {
           load(source: string, label: string) {
             const lane = lanes[cursor++ % lanes.length],
               result = lane.tail.then(async () => {
-                await lane.loader.materials;
+                await Promise.all([lane.loader.materials, fileMapPromise]);
                 return withTimeout(
                   lane.loader.instance.loadAsync(source),
                   MODEL_LOAD_TIMEOUT,
@@ -1902,8 +1916,8 @@ export default function Home() {
           },
         };
       },
-      primaryPool = makeLoaderPool(LDRAW, 3),
-      legacyPool = makeLoaderPool(LEGACY_LDRAW, 2),
+      primaryPool = makeLoaderPool(LDRAW, 6),
+      legacyPool = makeLoaderPool(LEGACY_LDRAW, 4),
       primary = primaryPool.primary,
       legacy = legacyPool.primary;
     const preloaded = new Set<string>(),
@@ -3720,7 +3734,8 @@ export default function Home() {
       position: THREE.Vector3,
       rotation?: THREE.Quaternion,
     ): Promise<Piece | null> => {
-      const counterpartId = turntableCounterpart[p.part.toLowerCase()];
+      const partLower = (p?.part || "").toLowerCase();
+      const counterpartId = partLower ? turntableCounterpart[partLower] : undefined;
       if (counterpartId && !p.embeddedGeometry && !state.bulkLoading) {
         const counterpartCatalog = paletteParts.find(
           (part) => part.part.toLowerCase() === counterpartId,
@@ -3733,7 +3748,7 @@ export default function Home() {
           const primary = await addPart(p, position.clone(), baseRotation),
             counterpart = await addPart(
               counterpartCatalog,
-              position.clone().add(turntableCounterpartOffset[p.part.toLowerCase()]),
+              position.clone().add(turntableCounterpartOffset[partLower] ?? new THREE.Vector3()),
               baseRotation,
             );
           if (!primary || !counterpart) return null;
@@ -3786,17 +3801,13 @@ export default function Home() {
           state.bulkLoading = wasBulkLoading;
           if (!wasBulkLoading) {
             setCount(state.pieces.length);
-            setMessage(
-              language === "es"
-                ? `${p.part} · Plataforma giratoria completa de 2 piezas`
-                : `${p.part} · Complete 2-piece turntable`,
-            );
+            setMessage(`${p.part} · Complete 2-piece turntable`);
             refreshDebug();
             scheduleRenderBatchRebuild();
           }
         }
       }
-      if (p.part.toLowerCase() === "61903" && !p.embeddedGeometry) {
+      if (partLower === "61903" && !p.embeddedGeometry) {
         const endCatalog = paletteParts.find((part) => part.part === "62520"),
           centreCatalog = paletteParts.find((part) => part.part === "62519");
         if (!endCatalog || !centreCatalog) return null;
@@ -6519,14 +6530,14 @@ export default function Home() {
     const undo = async () => {
       if (historyBusy || state.running) return false;
       if (!undoStack.length) {
-        setMessage("No hay acciones que deshacer");
+        setMessage("Nothing to undo");
         return false;
       }
       historyBusy = true;
       try {
         redoStack.push(captureEditorSnapshot());
         await restoreEditorSnapshot(undoStack.pop()!);
-        setMessage("Deshacer");
+        setMessage("Undo");
         return true;
       } finally {
         historyBusy = false;
@@ -6536,14 +6547,14 @@ export default function Home() {
     const redo = async () => {
       if (historyBusy || state.running) return false;
       if (!redoStack.length) {
-        setMessage("No hay acciones que rehacer");
+        setMessage("Nothing to redo");
         return false;
       }
       historyBusy = true;
       try {
         undoStack.push(captureEditorSnapshot());
         await restoreEditorSnapshot(redoStack.pop()!);
-        setMessage("Rehacer");
+        setMessage("Redo");
         return true;
       } finally {
         historyBusy = false;
@@ -6662,6 +6673,7 @@ export default function Home() {
           delete catalog.projectAssetKey;
           return {
             id: pieceIds.get(piece)!,
+            part: piece.part,
             catalog: catalog as unknown as JsonObject,
             asset,
             position: tuple3(piece.mesh.position),
@@ -6863,24 +6875,33 @@ export default function Home() {
         projectMapUpdateCandidates = new Map<string, MapUpdateCandidate>();
       let projectHasAutomaticMapUpdate = false;
       try {
+        let restoreIndex = 0;
         for (const saved of document.pieces) {
-          const asset = document.assets[saved.asset];
-          if (!asset) throw new Error(`Missing embedded asset ${saved.asset}`);
-          const catalog = {
+          const asset = document.assets ? document.assets[saved.asset] : undefined;
+          const partId = (saved.part ?? (saved.catalog as any)?.part ?? "part").toString();
+          const catalog: CatalogPart = {
+              part: partId,
+              name: (saved.catalog as any)?.name ?? partId,
+              color: (saved.catalog as any)?.color ?? 7,
+              category: (saved.catalog as any)?.category ?? "Technic",
               ...(saved.catalog as unknown as CatalogPart),
               embeddedGeometry: asset,
               projectAssetKey: saved.asset,
-              sourceKind: "packaged-cache" as const,
+              sourceKind: (asset ? "packaged-cache" : "catalog-search") as const,
             },
             piece = await addPart(
               catalog,
               new THREE.Vector3().fromArray(saved.position),
               new THREE.Quaternion().fromArray(saved.rotation),
             );
-          if (!piece) throw new Error(`Could not restore ${catalog.part}`);
+          if (!piece) {
+            console.warn(`Could not restore piece ${catalog.part || partId}`);
+            continue;
+          }
           piece.mesh.scale.fromArray(saved.scale);
+          const partName = (saved.part ?? (saved.catalog as any)?.part ?? piece.part ?? "").toString();
           piece.connectors = connectorDefaultsForPart(
-            saved.part,
+            partName,
             saved.connectors.map(loadConnector),
           );
           piece.colliders = saved.colliders.map(loadCollider);
@@ -6949,6 +6970,9 @@ export default function Home() {
                 sources: ["project"],
               });
             }
+          }
+          if (++restoreIndex % 15 === 0) {
+            await new Promise<void>((resolve) => setTimeout(resolve, 0));
           }
         }
         state.connections = document.connections.flatMap((saved) => {
@@ -7121,8 +7145,8 @@ export default function Home() {
       pasteIndex = 0;
       setMessage(
         pieces.length > 1
-          ? `${pieces.length} piezas copiadas`
-          : `${pieces[0].part} copiada`,
+          ? `${pieces.length} parts copied`
+          : `${pieces[0].part} copied`,
       );
       return true;
     };
@@ -7130,7 +7154,7 @@ export default function Home() {
     const pasteClipboard = async () => {
       if (state.running || historyBusy) return null;
       if (!clipboard) {
-        setMessage("Copia una pieza antes de pegar");
+        setMessage("Copy a part before pasting");
         return null;
       }
       const historyLength = undoStack.length;
@@ -7205,8 +7229,8 @@ export default function Home() {
       setConnectionRevision((value) => value + 1);
       setMessage(
         pasted.length > 1
-          ? `${pasted.length} piezas pegadas`
-          : `${pasted[0].part} pegada`,
+          ? `${pasted.length} parts pasted`
+          : `${pasted[0].part} pasted`,
       );
       return pasted[0];
     };
@@ -8212,6 +8236,11 @@ export default function Home() {
     const drop = (e: DragEvent) => {
       e.preventDefault();
       if (state.running) return;
+      const file = e.dataTransfer?.files?.[0];
+      if (file) {
+        void handleImportFile(file);
+        return;
+      }
       try {
         const p = JSON.parse(
           e.dataTransfer?.getData("application/x-ldraw-part") || "",
@@ -8253,7 +8282,7 @@ export default function Home() {
             );
         }
       } catch {
-        setMessage("No se pudo soltar esa pieza");
+        setMessage("Could not drop that part");
       }
     };
 
@@ -10219,7 +10248,7 @@ export default function Home() {
         s.simStartedMs = undefined;
         s.refreshDebug();
         setRunning(false);
-        setMessage("Simulación detenida · estado restaurado · log actualizado");
+        setMessage("Simulation stopped · state restored · log updated");
       }
     } finally {
       physicsTransitionRef.current = false;
@@ -10250,7 +10279,7 @@ export default function Home() {
           : await file.text(),
         rows = parseLDR(source);
       if (!stillActive()) return;
-      if (!rows.length) throw new Error("El archivo no contiene piezas LDraw");
+      if (!rows.length) throw new Error("The file does not contain any LDraw parts");
       const references = [...new Set(rows.map((row) => row.part.toLowerCase()))],
         paletteMatches = new Map<string, CatalogPart[]>();
       for (const part of paletteParts) {
@@ -10288,25 +10317,31 @@ export default function Home() {
       const paletteToLoad = paletteReferences.flatMap(
         (reference) => paletteMatches.get(reference) ?? [],
       );
-      await Promise.all(
-        [
-          ...new Map(
-            paletteToLoad.map((part) => [`${part.part}:${part.color}`, part]),
-          ).values(),
-        ].map(async (part) => {
-          await s.preloadPart(part);
-          if (!stillActive()) return;
-          paletteLoaded++;
-          setImportDraft((draft) =>
-            draft
-              ? {
-                  ...draft,
-                  progress: Math.min(paletteLoaded, paletteReferences.length),
-                }
-              : draft,
-          );
-        }),
-      );
+      const uniquePaletteParts = [
+        ...new Map(
+          paletteToLoad.map((part) => [`${part.part}:${part.color}`, part]),
+        ).values(),
+      ];
+      for (let i = 0; i < uniquePaletteParts.length; i += 4) {
+        if (!stillActive()) return;
+        const batch = uniquePaletteParts.slice(i, i + 4);
+        await Promise.all(
+          batch.map(async (part) => {
+            await s.preloadPart(part);
+            paletteLoaded++;
+          }),
+        );
+        if (!stillActive()) return;
+        setImportDraft((draft) =>
+          draft
+            ? {
+                ...draft,
+                progress: Math.min(paletteLoaded, paletteReferences.length),
+              }
+            : draft,
+        );
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
       if (!stillActive()) return;
       setImportDraft((draft) =>
         draft
@@ -10391,24 +10426,29 @@ export default function Home() {
             importFile: file.name,
           } as CatalogPart;
         });
-      await Promise.all(
-        externalToLoad.map(async (part) => {
-          await s.preloadPart(part);
-          if (!stillActive()) return;
-          externalLoaded++;
-          setImportDraft((draft) =>
-            draft
-              ? {
-                  ...draft,
-                  progress: Math.min(
-                    paletteReferences.length + externalLoaded,
-                    draft.total,
-                  ),
-                }
-              : draft,
-          );
-        }),
-      );
+      for (let i = 0; i < externalToLoad.length; i += 4) {
+        if (!stillActive()) return;
+        const batch = externalToLoad.slice(i, i + 4);
+        await Promise.all(
+          batch.map(async (part) => {
+            await s.preloadPart(part);
+            externalLoaded++;
+          }),
+        );
+        if (!stillActive()) return;
+        setImportDraft((draft) =>
+          draft
+            ? {
+                ...draft,
+                progress: Math.min(
+                  paletteReferences.length + externalLoaded,
+                  draft.total,
+                ),
+              }
+            : draft,
+        );
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
       if (!stillActive()) return;
       const placements = rows.map((row) => {
         const converted = ldrawToScenePlacement(row),
@@ -10453,7 +10493,7 @@ export default function Home() {
       setImportDraft((draft) => ({
         ...(draft ?? empty),
         status: "error",
-        error: error instanceof Error ? error.message : "No se pudo importar el modelo",
+        error: error instanceof Error ? error.message : "Could not import model",
       }));
     }
   };
@@ -10476,8 +10516,8 @@ export default function Home() {
             placement.rotation,
           );
         if (piece) pieces.push(piece);
-        if (index % 40 === 39)
-          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        if (index % 8 === 7)
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
       }
     } finally {
       s.bulkLoading = false;
@@ -10497,11 +10537,7 @@ export default function Home() {
     });
     setCount(s.pieces.length);
     if (!pieces.length) {
-      setMessage(
-        language === "es"
-          ? "No se pudo colocar ninguna pieza del modelo"
-          : "No model parts could be placed",
-      );
+      setMessage("No model parts could be placed");
       return;
     }
     // Temporary performance mode: imported models keep their LDraw position
@@ -10601,9 +10637,7 @@ export default function Home() {
     setProjectBusy(true);
     const previousSavedRevision = savedProjectRevisionRef.current;
     try {
-      projectNameRef.current =
-        projectName.trim() ||
-        (language === "es" ? "Mecanismo sin título" : "Untitled mechanism");
+      projectNameRef.current = projectName.trim() || "Untitled mechanism";
       savedProjectRevisionRef.current = projectRevisionRef.current;
       const document = state.createProjectDocument();
       await saveBrowserProject(document);
@@ -10614,16 +10648,10 @@ export default function Home() {
       setProjectDirty(false);
       setSaveNamePrompt(false);
       setProjectNameEditing(false);
-      setMessage(
-        language === "es"
-          ? `Proyecto «${document.name}» guardado en el navegador`
-          : `Project “${document.name}” saved in this browser`,
-      );
+      setMessage(`Project “${document.name}” saved in this browser`);
     } catch (error) {
       savedProjectRevisionRef.current = previousSavedRevision;
-      setMessage(
-        `${language === "es" ? "No se pudo guardar" : "Could not save"}: ${error instanceof Error ? error.message : "IndexedDB"}`,
-      );
+      setMessage(`Could not save: ${error instanceof Error ? error.message : "IndexedDB"}`);
     } finally {
       setProjectBusy(false);
     }
@@ -10791,7 +10819,7 @@ export default function Home() {
     reset();
     const id = createProjectId(),
       createdAt = new Date().toISOString(),
-      name = language === "es" ? "Mecanismo sin título" : "Untitled mechanism";
+      name = "Untitled mechanism";
     activeProjectIdRef.current = id;
     projectCreatedAtRef.current = createdAt;
     projectRevisionRef.current = 0;
@@ -10807,7 +10835,7 @@ export default function Home() {
     setProjectNameEditing(false);
     appRef.current?.scheduleRecoverySave(true, false);
     setProjectMenuOpen(false);
-    setMessage(language === "es" ? "Proyecto nuevo" : "New project");
+    setMessage("New project");
   };
 
   const requestCreateNewProject = () => {
@@ -10840,7 +10868,7 @@ export default function Home() {
           name: uniqueProjectName(
             document.name,
             existingProjects,
-            language === "es" ? "Proyecto importado" : "Imported project",
+            "Imported project",
           ),
           createdAt: now,
           updatedAt: now,
@@ -10854,30 +10882,55 @@ export default function Home() {
       setProjectNameEditing(false);
       await refreshProjectList();
       setProjectMenuOpen(false);
-      setMessage(
-        language === "es"
-          ? `Proyecto «${importedDocument.name}» importado como proyecto nuevo`
-          : `Project “${importedDocument.name}” imported as a new project`,
-      );
+      setMessage(`Project “${importedDocument.name}” imported as a new project`);
     } catch (error) {
-      setMessage(
-        `${language === "es" ? "Archivo de proyecto no válido" : "Invalid project file"}: ${error instanceof Error ? error.message : "error"}`,
-      );
+      setMessage(`Invalid project file: ${error instanceof Error ? error.message : "error"}`);
     } finally {
       setProjectBusy(false);
     }
   };
 
   const importProjectFile = async (file: File) => {
+    if (running || projectBusy) return;
     try {
       const document = decodeProjectFile(await file.arrayBuffer());
       if (projectDirty) setProjectConfirmation({ kind: "import", document });
       else void performImportProject(document);
     } catch (error) {
       setMessage(
-        `${language === "es" ? "Archivo de proyecto no válido" : "Invalid project file"}: ${error instanceof Error ? error.message : "error"}`,
+        `Invalid project file: ${error instanceof Error ? error.message : "error"}`,
       );
     }
+  };
+
+  const handleImportFile = async (file: File) => {
+    const fileName = file.name.toLowerCase();
+    if (fileName.endsWith(".simstudio")) {
+      await importProjectFile(file);
+      return;
+    }
+    // Attempt decoding as project save file (JSON, compressed, or binary)
+    try {
+      const buffer = await file.arrayBuffer();
+      const document = decodeProjectFile(buffer);
+      if (document && Array.isArray(document.pieces)) {
+        if (projectDirty) setProjectConfirmation({ kind: "import", document });
+        else void performImportProject(document);
+        return;
+      }
+    } catch {}
+
+    try {
+      const slice = await file.slice(0, 11).arrayBuffer();
+      const bytes = new Uint8Array(slice);
+      const magic = [83, 73, 77, 83, 84, 85, 68, 73, 79, 1, 10]; // SIMSTUDIO\u0001\n
+      if (bytes.length === 11 && magic.every((b, i) => bytes[i] === b)) {
+        await importProjectFile(file);
+        return;
+      }
+    } catch {}
+
+    await importModel(file);
   };
 
   const performRemoveSavedProject = async (id: string) => {
@@ -12373,24 +12426,6 @@ export default function Home() {
             <small>{t.subtitle}</small>
           </div>
         </div>
-        <div className="language-toggle" role="group" aria-label="Language / Idioma">
-          <button
-            className={language === "es" ? "active" : ""}
-            onClick={() => setLanguage("es")}
-            aria-label="Español"
-            title="Español"
-          >
-            🇪🇸
-          </button>
-          <button
-            className={language === "en" ? "active" : ""}
-            onClick={() => setLanguage("en")}
-            aria-label="English"
-            title="English"
-          >
-            🇬🇧
-          </button>
-        </div>
         <button
           className="theme-toggle"
           onClick={() => setTheme((value) => (value === "dark" ? "light" : "dark"))}
@@ -12420,11 +12455,11 @@ export default function Home() {
             ref={fileRef}
             type="file"
             hidden
-            accept=".ldr,.mpd,.io"
+            accept=".simstudio,.ldr,.mpd,.io,.json"
             onChange={(e) => {
               const file = e.target.files?.[0];
               e.currentTarget.value = "";
-              if (file) void importModel(file);
+              if (file) void handleImportFile(file);
             }}
           />
           <button
@@ -12442,11 +12477,35 @@ export default function Home() {
             ↻ {t.mapUpdatesButton}
             <b>{mapUpdates.length}</b>
           </button>
+          <button
+            className="ghost settings-trigger"
+            onClick={() => setSettingsOpen(true)}
+            title="Settings · Graphics & System"
+            aria-label="Settings"
+            style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "8px 10px" }}
+          >
+            <svg
+              width="15"
+              height="15"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+              style={{ flexShrink: 0 }}
+            >
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+            <span>Settings</span>
+          </button>
           <input
             ref={projectFileRef}
             type="file"
             hidden
-            accept={PROJECT_EXTENSION}
+            accept={`${PROJECT_EXTENSION},.json`}
             onChange={(event) => {
               const file = event.target.files?.[0];
               event.currentTarget.value = "";
@@ -12458,8 +12517,8 @@ export default function Home() {
             style={{ minWidth: 34, padding: "10px 8px", fontSize: 16, lineHeight: 1 }}
             disabled={running}
             onClick={() => void appRef.current?.undo()}
-            aria-label={language === "es" ? "Deshacer" : "Undo"}
-            title={`${language === "es" ? "Deshacer" : "Undo"} · Ctrl+Z`}
+            aria-label="Undo"
+            title="Undo · Ctrl+Z"
           >
             ↶
           </button>
@@ -12468,8 +12527,8 @@ export default function Home() {
             style={{ minWidth: 34, padding: "10px 8px", fontSize: 16, lineHeight: 1 }}
             disabled={running}
             onClick={() => void appRef.current?.redo()}
-            aria-label={language === "es" ? "Rehacer" : "Redo"}
-            title={`${language === "es" ? "Rehacer" : "Redo"} · Ctrl+Y`}
+            aria-label="Redo"
+            title="Redo · Ctrl+Y"
           >
             ↷
           </button>
@@ -12478,8 +12537,8 @@ export default function Home() {
             style={{ minWidth: 34, padding: "10px 8px", fontSize: 16, lineHeight: 1 }}
             disabled={running || !selected}
             onClick={() => appRef.current?.copySelected()}
-            aria-label={language === "es" ? "Copiar pieza" : "Copy part"}
-            title={`${language === "es" ? "Copiar pieza" : "Copy part"} · Ctrl+C`}
+            aria-label="Copy part"
+            title="Copy part · Ctrl+C"
           >
             ⧉
           </button>
@@ -12488,8 +12547,8 @@ export default function Home() {
             style={{ minWidth: 34, padding: "10px 8px", fontSize: 16, lineHeight: 1 }}
             disabled={running}
             onClick={() => void appRef.current?.pasteClipboard()}
-            aria-label={language === "es" ? "Pegar pieza" : "Paste part"}
-            title={`${language === "es" ? "Pegar pieza" : "Paste part"} · Ctrl+V`}
+            aria-label="Paste part"
+            title="Paste part · Ctrl+V"
           >
             ⎘
           </button>
@@ -13185,144 +13244,6 @@ export default function Home() {
       <aside className="inspector">
         <div className="panel-title">
           <span>{t.properties}</span>
-        </div>
-        <div className="renderer-setting">
-          <label>{language === "es" ? "Motor gráfico" : "Graphics renderer"}</label>
-          <div
-            className="renderer-mode"
-            role="group"
-            aria-label={language === "es" ? "Motor gráfico" : "Graphics renderer"}
-          >
-            {(
-              [
-                ["auto", language === "es" ? "Automático" : "Automatic"],
-                ["webgpu", "WebGPU"],
-                ["webgl", "WebGL"],
-              ] as const
-            ).map(([value, label]) => (
-              <button
-                key={value}
-                type="button"
-                className={rendererPreference === value ? "active" : ""}
-                aria-pressed={rendererPreference === value}
-                onClick={() => setRendererPreference(value)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          <small>
-            {language === "es" ? "Activo" : "Active"}: {viewportRenderer}
-            {rendererPreference === "auto"
-              ? language === "es"
-                ? " · usa WebGPU cuando está disponible"
-                : " · uses WebGPU when available"
-              : ""}
-          </small>
-          <label className="renderer-quality-label">
-            {language === "es" ? "Escalado de calidad" : "Quality scaling"}
-          </label>
-          <div
-            className="renderer-mode renderer-quality"
-            role="group"
-            aria-label={language === "es" ? "Escalado de calidad" : "Quality scaling"}
-          >
-            <button
-              type="button"
-              className={adaptiveRendering ? "active" : ""}
-              aria-pressed={adaptiveRendering}
-              onClick={() => setAdaptiveRendering(true)}
-            >
-              {language === "es" ? "Adaptativa" : "Adaptive"}
-            </button>
-            <button
-              type="button"
-              className={!adaptiveRendering ? "active" : ""}
-              aria-pressed={!adaptiveRendering}
-              onClick={() => setAdaptiveRendering(false)}
-            >
-              {language === "es" ? "Fija 100%" : "Fixed 100%"}
-            </button>
-          </div>
-          <small>
-            {adaptiveRendering
-              ? language === "es"
-                ? "Reduce resolución y MSAA si faltan FPS."
-                : "Reduces resolution and MSAA when FPS drops."
-              : language === "es"
-                ? "Mantiene resolución completa y MSAA 4×."
-                : "Keeps full resolution and 4× MSAA."}
-          </small>
-          <label className="renderer-quality-label">
-            {language === "es" ? "Apariencia del gizmo" : "Gizmo appearance"}
-          </label>
-          <div className="physics-parameter gizmo-appearance-parameter">
-            <div>
-              <span>{language === "es" ? "Escala" : "Scale"}</span>
-              <output>{gizmoScale.toFixed(2)}×</output>
-            </div>
-            <input
-              type="range"
-              min="0.5"
-              max="2"
-              step="0.05"
-              value={gizmoScale}
-              onChange={(event) => setGizmoScale(Number(event.target.value))}
-            />
-          </div>
-          <div className="physics-parameter gizmo-appearance-parameter">
-            <div>
-              <span>{language === "es" ? "Grosor" : "Thickness"}</span>
-              <output>{gizmoThickness.toFixed(2)}×</output>
-            </div>
-            <input
-              type="range"
-              min="0.5"
-              max="2.5"
-              step="0.05"
-              value={gizmoThickness}
-              onChange={(event) => setGizmoThickness(Number(event.target.value))}
-            />
-          </div>
-          <label>
-            {language === "es" ? "Contorno negro de las piezas" : "Part outlines"}
-          </label>
-          <button
-            type="button"
-            className="map-toggle"
-            aria-pressed={modelOutlinesVisible}
-            onClick={() => {
-              const next = !modelOutlinesVisible,
-                state = appRef.current;
-              modelOutlinesVisibleRef.current = next;
-              setModelOutlinesVisible(next);
-              try {
-                localStorage.setItem("sim-studio:model-outlines", next ? "1" : "0");
-              } catch {}
-              if (!state) return;
-              state.renderLineBatchItems.forEach(({ line }) => {
-                line.visible = next;
-              });
-              const batchedPieces = new Set(
-                state.renderLineBatchItems.flatMap(({ pieces }) => pieces),
-              );
-              state.pieces.forEach((piece) => {
-                piece.mesh.traverse((object) => {
-                  if (object instanceof THREE.Line)
-                    object.visible = next && !batchedPieces.has(piece);
-                });
-              });
-              state.requestRender();
-            }}
-          >
-            {modelOutlinesVisible
-              ? language === "es"
-                ? "Desactivar contorno"
-                : "Disable outlines"
-              : language === "es"
-                ? "Activar contorno"
-                : "Enable outlines"}
-          </button>
         </div>
         <div className="connection-editor gear-motor-editor">
           <label>{language === "es" ? "Motores de engranaje" : "Gear motors"}</label>

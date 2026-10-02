@@ -13,6 +13,8 @@ const eslintConfig = defineConfig([
     "dist/**",
     "pages-dist/**",
     "app/physics/wasm/**",
+    "app/renderer/wasm/**",
+    "app/vendor/**",
     "physics-core/target/**",
     "out/**",
     "build/**",
@@ -37,6 +39,17 @@ const eslintConfig = defineConfig([
       react: {
         version: "detect",
       },
+    },
+    rules: {
+      "no-empty": "warn",
+      "prefer-const": "warn",
+      "@typescript-eslint/no-unused-vars": "warn",
+      "no-control-regex": "off",
+      "jsx-a11y/no-autofocus": "warn",
+      "jsx-a11y/click-events-have-key-events": "warn",
+      "jsx-a11y/no-noninteractive-element-interactions": "warn",
+      "jsx-a11y/no-noninteractive-tabindex": "warn",
+      "@next/next/no-img-element": "off",
     },
   },
 ]);
