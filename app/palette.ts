@@ -129,7 +129,6 @@ export const paletteRequestAliases:Record<string,string>={
   "sg01":"68488",
   "s/g1":"68488",
   "54696":"68488",
-  "54675":"68488",
   "68487":"54676",
 };
 const thumbAlias:Record<string,string>={"32556":"32556b","19467c01":"19467","21828c01":"21828","3167":"3167s01","2477":"24779s01"};

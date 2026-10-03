@@ -1752,7 +1752,7 @@ export default function Home() {
           ? imported
           : paletteParts.filter((p) => p.family === category),
       );
-      return;
+      return undefined;
     }
     // A non-empty search looks through every category (and imported parts),
     // never only the active tab, and only returns parts that really match.
@@ -1779,6 +1779,43 @@ export default function Home() {
       if (r >= 0) matches.push({ part, rank: r });
     }
     setResults(matches.sort((a, b) => a.rank - b.rank).map((m) => m.part));
+    // A part number that is not in the local catalog (or only matches through
+    // an alias) is looked up in the LDraw libraries and added to the results.
+    const exactId = (p: CatalogPart) =>
+      [p.part, p.modelPart, p.resolvedPart, p.requestedPart].some(
+        (id) => id?.toLowerCase() === query,
+      );
+    if (!/^[0-9][0-9a-z]{2,}$/.test(query) || matches.some((m) => exactId(m.part)))
+      return undefined;
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void lookupLDrawParts(query)
+        .catch(() => [])
+        .then((found) => {
+          if (cancelled || !found.length) return;
+          const extra: CatalogPart[] = found.map((item) => ({
+            part: item.part,
+            name: item.name,
+            kind: kindFor("", item.name),
+            color: 71,
+            origin: "catalog-search" as const,
+            sourceKind: "ldraw-network" as const,
+            requestedPart: item.part,
+            catalogReturnedPart: item.part,
+            resolvedPart: item.part,
+            catalogQuery: query,
+          }));
+          setResults((old) => [
+            ...extra.filter((item) => !old.some((entry) => entry.part === item.part)),
+            ...old,
+          ]);
+          extra.slice(0, 2).forEach((item) => void appRef.current?.preloadPart(item));
+        });
+    }, 350);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, [category, search, imported]);
 
   useEffect(() => {
