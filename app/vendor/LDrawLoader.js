@@ -633,57 +633,22 @@ class LDrawParsedCache {
 		}
 
 
-		let triedLowerCase = false;
-		let locationState = FILE_LOCATION_TRY_PARTS;
-		while ( locationState !== FILE_LOCATION_NOT_FOUND ) {
+		// Go straight to the right folder instead of trying every combination:
+		// each wrong guess is a real 404 request. Hi-res primitives ("48/x.dat")
+		// live in p/48, sub-parts ("s/x.dat") in parts/s.
+		const lowerFile = fileName.toLowerCase();
+		let urls;
+		if ( /^(48|8)\//.test( lowerFile ) ) urls = [ 'p/' + lowerFile ];
+		else if ( /^s\//.test( lowerFile ) ) urls = [ 'parts/' + lowerFile ];
+		else if ( /^(parts|p|models)\//.test( lowerFile ) ) urls = [ lowerFile ];
+		else {
 
-			let subobjectURL = fileName;
-			switch ( locationState ) {
+			urls = [ 'parts/' + fileName, 'p/' + fileName, 'models/' + fileName, fileName ];
+			if ( lowerFile !== fileName ) urls.push( 'parts/' + lowerFile, 'p/' + lowerFile, 'models/' + lowerFile, lowerFile );
 
-				case FILE_LOCATION_AS_IS:
-					locationState = locationState + 1;
-					break;
+		}
 
-				case FILE_LOCATION_TRY_PARTS:
-					subobjectURL = 'parts/' + subobjectURL;
-					locationState = locationState + 1;
-					break;
-
-				case FILE_LOCATION_TRY_P:
-					subobjectURL = 'p/' + subobjectURL;
-					locationState = locationState + 1;
-					break;
-
-				case FILE_LOCATION_TRY_MODELS:
-					subobjectURL = 'models/' + subobjectURL;
-					locationState = locationState + 1;
-					break;
-
-				case FILE_LOCATION_TRY_RELATIVE:
-					subobjectURL = fileName.substring( 0, fileName.lastIndexOf( '/' ) + 1 ) + subobjectURL;
-					locationState = locationState + 1;
-					break;
-
-				case FILE_LOCATION_TRY_ABSOLUTE:
-
-					if ( triedLowerCase ) {
-
-						// Try absolute path
-						locationState = FILE_LOCATION_NOT_FOUND;
-
-					} else {
-
-						// Next attempt is lower case
-						fileName = fileName.toLowerCase();
-						subobjectURL = fileName;
-						triedLowerCase = true;
-						locationState = FILE_LOCATION_TRY_PARTS;
-
-					}
-
-					break;
-
-			}
+		for ( const subobjectURL of urls ) {
 
 			try {
 
