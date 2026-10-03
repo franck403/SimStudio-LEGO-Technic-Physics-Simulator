@@ -517,6 +517,8 @@ class LineParser {
 const globalLDrawTextCache = new Map();
 // Cache keys of sub-files that a given library could not provide.
 const globalLDrawMissCache = new Set();
+// Full URLs already known to be 404, so they are never requested twice.
+const globalLDrawBadUrls = new Set();
 
 class LDrawParsedCache {
 
@@ -648,17 +650,35 @@ class LDrawParsedCache {
 
 		}
 
-		for ( const subobjectURL of urls ) {
+		// Own library first, then every fallback library: a part can live in one
+		// library while its newer sub-parts only exist in another.
+		const bases = [ loader.partsLibraryPath, ...( loader.fallbackLibraries || [] ).filter( base => base !== loader.partsLibraryPath ) ];
+		for ( const base of bases ) {
 
-			try {
+			const baseLoader = base === loader.partsLibraryPath ? fileLoader : new FileLoader( loader.manager );
+			if ( baseLoader !== fileLoader ) {
 
-				const text = await fileLoader.loadAsync( subobjectURL );
-				globalLDrawTextCache.set( cacheKey, text );
-				return text;
+				baseLoader.setPath( base );
+				baseLoader.setRequestHeader( loader.requestHeader );
+				baseLoader.setWithCredentials( loader.withCredentials );
 
-			} catch ( _ ) {
+			}
 
-				continue;
+			for ( const subobjectURL of urls ) {
+
+				const fullUrl = base + subobjectURL;
+				if ( globalLDrawBadUrls.has( fullUrl ) ) continue;
+				try {
+
+					const text = await baseLoader.loadAsync( subobjectURL );
+					globalLDrawTextCache.set( cacheKey, text );
+					return text;
+
+				} catch ( _ ) {
+
+					globalLDrawBadUrls.add( fullUrl );
+
+				}
 
 			}
 
@@ -1827,6 +1847,9 @@ class LDrawLoader extends Loader {
 
 		// Sub-files the last load could not find (used to prefer a complete library).
 		this.missingFiles = new Set();
+
+		// Other parts libraries to ask when a sub-file is missing from this one.
+		this.fallbackLibraries = [];
 
 		// If this flag is set to true the vertex normals will be smoothed.
 		this.smoothNormals = true;

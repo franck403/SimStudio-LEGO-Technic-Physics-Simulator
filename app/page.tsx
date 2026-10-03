@@ -2026,6 +2026,12 @@ export default function Home() {
         const instance = new LDrawLoader();
         instance.setConditionalLineMaterial(LDrawConditionalLineMaterial);
         instance.setPartsLibraryPath(base);
+        (instance as unknown as { fallbackLibraries: string[] }).fallbackLibraries = [
+          LDRAW,
+          LEGACY_LDRAW,
+          MIRROR_LDRAW,
+          OFFICIAL_LDRAW,
+        ].filter((library) => library !== base);
         void fileMapPromise.then((map) => {
           if (map) instance.setFileMap(map);
         });
@@ -2075,6 +2081,25 @@ export default function Home() {
       officialPool = makeLoaderPool(OFFICIAL_LDRAW, 2),
       primary = primaryPool.primary,
       legacy = legacyPool.primary;
+    // LDraw headers carry "UPDATE yyyy-mm". Libraries are mirrors of different
+    // age, so the one whose main file is newest is tried first (an old copy
+    // may predate the sub-parts a newer official file relies on).
+    const libraryStamps = new Map<string, Promise<number>>(),
+      libraryStamp = (base: string, file: string) => {
+        const key = `${base}|${file}`;
+        let stamp = libraryStamps.get(key);
+        if (!stamp) {
+          stamp = fetch(`${base}parts/${file}.dat`)
+            .then((response) => (response.ok ? response.text() : ""))
+            .then((text) => {
+              const match = text.match(/UPDATE\s+(\d{4})-(\d{2})/i);
+              return match ? Number(match[1]) * 100 + Number(match[2]) : text ? 1 : 0;
+            })
+            .catch(() => 0);
+          libraryStamps.set(key, stamp);
+        }
+        return stamp;
+      };
     const preloaded = new Set<string>(),
       preloading = new Map<string, Promise<void>>(),
       modelCache = new Map<string, THREE.Object3D>(),
@@ -2169,7 +2194,15 @@ export default function Home() {
             const source = `data:text/plain;charset=utf-8,${encodeURIComponent(
               modelTextFor({ ...p, color: sourceColor }, file),
             )}`;
-            for (const [pool, base, kind] of sources) {
+            const stamps = await Promise.all(
+                sources.map(([, base]) => libraryStamp(base, file)),
+              ),
+              ordered = sources
+                .map((entry, index) => ({ entry, stamp: stamps[index], index }))
+                .sort((a, b) => b.stamp - a.stamp || a.index - b.index)
+                .filter((item) => item.stamp > 0)
+                .map((item) => item.entry);
+            for (const [pool, base, kind] of ordered.length ? ordered : sources) {
               try {
                 const loaded = flattenLDrawRenderables(
                   await pool.load(source, `La pieza ${p.part}`),
