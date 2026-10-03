@@ -207,6 +207,13 @@ const LDRAW = "https://cdn.jsdelivr.net/gh/remig/ldraw_parts@master/";
 
 const LEGACY_LDRAW = "https://cdn.jsdelivr.net/gh/pybricks/ldraw@master/";
 
+// Extra fallbacks for newer parts (Powered Up / Spike sub-parts such as
+// u9367c01 or "~Moved to" stubs like u9363) that the mirrors above may lack.
+const OFFICIAL_LDRAW = "https://library.ldraw.org/library/official/";
+
+const MIRROR_LDRAW =
+  "https://cdn.jsdelivr.net/gh/gkjohnson/ldraw-parts-library@master/complete/ldraw/";
+
 const MODEL_LOAD_TIMEOUT = 20_000;
 
 const AUTO_CONNECTIONS_ENABLED = true;
@@ -479,7 +486,7 @@ const fetchLDrawFileInfo = async (
   id: string,
   depth = 0,
 ): Promise<{ part: string; name: string } | undefined> => {
-  for (const base of [LDRAW, LEGACY_LDRAW]) {
+  for (const base of [LDRAW, LEGACY_LDRAW, MIRROR_LDRAW, OFFICIAL_LDRAW]) {
     try {
       const response = await fetch(`${base}parts/${id}.dat`);
       if (!response.ok) continue;
@@ -2064,6 +2071,8 @@ export default function Home() {
       },
       primaryPool = makeLoaderPool(LDRAW, 6),
       legacyPool = makeLoaderPool(LEGACY_LDRAW, 4),
+      mirrorPool = makeLoaderPool(MIRROR_LDRAW, 2),
+      officialPool = makeLoaderPool(OFFICIAL_LDRAW, 2),
       primary = primaryPool.primary,
       legacy = legacyPool.primary;
     const preloaded = new Set<string>(),
@@ -2140,6 +2149,8 @@ export default function Home() {
           const sources = [
             [primaryPool, LDRAW, "primary"],
             [legacyPool, LEGACY_LDRAW, "legacy"],
+            [mirrorPool, MIRROR_LDRAW, "legacy"],
+            [officialPool, OFFICIAL_LDRAW, "legacy"],
           ] as const;
           // Try every LDraw file of this part number (modelPart first, then its
           // a/b/c/c01 siblings) on both libraries; skip empty or broken meshes.
