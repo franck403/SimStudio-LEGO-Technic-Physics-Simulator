@@ -3470,3 +3470,82 @@ body.resizing-inspector * {
   cursor: pointer;
   padding: 0 2px;
 }
+
+.settings-dialog {
+  width: min(520px, 95vw);
+}
+.settings-body {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.settings-body h3 {
+  margin: 8px 0 0;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--blue);
+}
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border: 1px solid #cbd6dd;
+  border-radius: 9px;
+  background: #fff;
+  padding: 9px 11px;
+  font-size: 11px;
+}
+.settings-row input[type="range"] {
+  width: 150px;
+}
+.settings-choice {
+  display: flex;
+  gap: 5px;
+}
+.settings-choice button {
+  border: 1px solid #bfcbd3;
+  border-radius: 6px;
+  background: #f1f4f6;
+  color: inherit;
+  padding: 5px 9px;
+  font-size: 10px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.settings-choice button.active {
+  border-color: #4b8fe8;
+  background: #eaf2ff;
+  color: #145db8;
+}
+.settings-help {
+  margin: 0;
+  font-size: 10px;
+  color: #66747e;
+}
+.settings-reload {
+  align-self: flex-start;
+}
+.force-reload-button {
+  width: 100%;
+  margin: 8px 0 4px;
+  font-size: 10px;
+}
+.studio.dark .settings-row {
+  background: #1e2226;
+  border-color: #444b52;
+}
+.studio.dark .settings-choice button {
+  background: #2c3136;
+  border-color: #4a5158;
+}
+.studio.dark .settings-choice button.active {
+  background: #213a5c;
+  border-color: #4b8fe8;
+  color: #8dbbf4;
+}
+.studio.dark .settings-help {
+  color: #aab4bb;
+}

@@ -9,7 +9,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import * as THREE from "three";
-import { LDrawLoader } from "./vendor/LDrawLoader.js";
+import { LDrawLoader, clearLDrawCaches } from "./vendor/LDrawLoader.js";
 import { LDrawConditionalLineMaterial } from "three/addons/materials/LDrawConditionalLineMaterial.js";
 import { ldrawToScenePlacement, makeLDR, parseLDR, type LDrawPlacement } from "./ldraw";
 import { flattenLDrawRenderables } from "./ldraw-geometry";
@@ -2051,6 +2051,11 @@ export default function Home() {
         let cursor = 0;
         return {
           primary: lanes[0].loader,
+          reset() {
+            lanes.forEach((lane) =>
+              (lane.loader.instance as unknown as { resetCaches?: () => void }).resetCaches?.(),
+            );
+          },
           load(source: string, label: string) {
             const lane = lanes[cursor++ % lanes.length],
               result = lane.tail.then(async () => {
@@ -3916,6 +3921,76 @@ export default function Home() {
       }
     };
 
+    // Drops every cached copy of a model (downloaded files, parsed geometry,
+    // render clones) and re-downloads it from the LDraw libraries. Geometry
+    // embedded in a saved project is ignored too, so a part that was saved
+    // incomplete is rebuilt from the real files.
+    const forceReloadParts = async (targets: Piece[]) => {
+      clearLDrawCaches();
+      [primaryPool, legacyPool, mirrorPool, officialPool].forEach((pool) => pool.reset());
+      libraryStamps.clear();
+      modelCache.clear();
+      sourceModelCache.clear();
+      modelSourceCache.clear();
+      preloaded.clear();
+      preloading.clear();
+      const seenKeys = new Set<string>();
+      let reloaded = 0;
+      state.disposeRenderBatches();
+      for (const piece of targets) {
+        try {
+          const key = correctionStorageKeyFor(piece);
+          if (!seenKeys.has(key)) {
+            seenKeys.add(key);
+            // Automatic maps were generated from the old (possibly incomplete)
+            // mesh; hand-edited maps are never touched.
+            const provenance = readMapProvenance(localStorage, key);
+            if (provenance.connectors?.origin === "automatic") {
+              localStorage.removeItem(`sim-connectors-v4:${key}`);
+              connectorCache.delete(key);
+            }
+            if (provenance.colliders?.origin === "automatic") {
+              localStorage.removeItem(`sim-colliders-v1:${key}`);
+              collisionCache.delete(key);
+            }
+          }
+          const fresh = {
+            ...piece,
+            embeddedGeometry: undefined,
+            geometry: undefined,
+            projectAssetKey: undefined,
+            sourceKind: "ldraw-network" as const,
+          };
+          const exact = await loadPartModel(fresh);
+          prepareModel(exact);
+          exact.traverse((object) => {
+            if (object instanceof THREE.Mesh) {
+              object.castShadow = true;
+              object.receiveShadow = true;
+            }
+          });
+          piece.mesh.clear();
+          piece.mesh.add(exact);
+          Object.assign(piece, {
+            embeddedGeometry: undefined,
+            geometry: undefined,
+            projectAssetKey: undefined,
+            sourceKind: "ldraw-network",
+            downloadUrl: fresh.downloadUrl,
+            downloadSource: fresh.downloadSource,
+          });
+          piece.mesh.updateMatrixWorld(true);
+          reloaded++;
+        } catch {
+          // Keep the old mesh for a part that cannot be downloaded.
+        }
+      }
+      state.rebuildRenderBatches();
+      state.refreshDebug();
+      state.requestRender();
+      return reloaded;
+    };
+
     // --- Scene editing and connections -------------------------------------
     const rubberBeltLength: Record<string, number> = {
       "85543": 5.9,
@@ -4237,6 +4312,7 @@ export default function Home() {
       addPart,
       preloadPart,
       recolorPart,
+      forceReloadParts,
       renderImportPreview,
       rebuildRenderBatches,
       updateRenderBatches,
@@ -10240,6 +10316,43 @@ export default function Home() {
     );
   };
 
+  const forceReloadModels = async (all: boolean) => {
+    const s = appRef.current;
+    if (!s || running) return;
+    const base = s.selected,
+      targets = all
+        ? s.pieces
+        : base
+          ? s.pieces.filter((piece) => piece.part === base.part)
+          : [];
+    if (!all && !targets.length) {
+      setMessage(t.forceReloadNone);
+      return;
+    }
+    setMessage(t.forceReloading);
+    const count = await s.forceReloadParts(targets);
+    setMessage(`${t.forceReloaded} · ${count}/${targets.length}`);
+    if (base) setSelectedId(base.id);
+    s.scheduleRecoverySave();
+  };
+
+  const applyModelOutlines = (visible: boolean) => {
+    modelOutlinesVisibleRef.current = visible;
+    setModelOutlinesVisible(visible);
+    try {
+      localStorage.setItem("sim-studio:model-outlines", visible ? "1" : "0");
+    } catch {}
+    const s = appRef.current;
+    if (!s) return;
+    s.pieces.forEach((piece) =>
+      piece.mesh.traverse((object) => {
+        if (object instanceof THREE.Line) object.visible = visible;
+      }),
+    );
+    s.rebuildRenderBatches();
+    s.requestRender();
+  };
+
   const changeSelectedColor = async (color: number) => {
     const s = appRef.current,
       piece = s?.selected;
@@ -12898,6 +13011,145 @@ export default function Home() {
           </button>
         </div>
       </header>
+      {settingsOpen && (
+        <div
+          className="project-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setSettingsOpen(false);
+          }}
+        >
+          <section
+            className="project-dialog settings-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="settings-title"
+          >
+            <div className="project-dialog-head">
+              <div>
+                <small>SIM STUDIO · {t.settingsSubtitle.toUpperCase()}</small>
+                <h2 id="settings-title">{t.settings}</h2>
+              </div>
+              <button
+                className="project-close"
+                onClick={() => setSettingsOpen(false)}
+                aria-label={t.close}
+              >
+                ×
+              </button>
+            </div>
+            <div className="settings-body">
+              <h3>{t.settingsGraphics}</h3>
+              <div className="settings-row">
+                <span>
+                  {t.settingsRenderer} · {t.settingsRendererActive}: {viewportRenderer}
+                </span>
+                <div className="settings-choice">
+                  {(["auto", "webgpu", "webgl"] as const).map((option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      className={rendererPreference === option ? "active" : ""}
+                      onClick={() => setRendererPreference(option)}
+                    >
+                      {option === "auto" ? "Auto" : option === "webgpu" ? "WebGPU" : "WebGL"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <label className="settings-row">
+                <span>{t.settingsAdaptive}</span>
+                <input
+                  type="checkbox"
+                  checked={adaptiveRendering}
+                  onChange={(event) => setAdaptiveRendering(event.target.checked)}
+                />
+              </label>
+              <label className="settings-row">
+                <span>{t.settingsOutlines}</span>
+                <input
+                  type="checkbox"
+                  checked={modelOutlinesVisible}
+                  onChange={(event) => applyModelOutlines(event.target.checked)}
+                />
+              </label>
+              <label className="settings-row">
+                <span>{t.settingsControlsHelp}</span>
+                <input
+                  type="checkbox"
+                  checked={controlsHelpVisible}
+                  onChange={(event) => {
+                    setControlsHelpVisible(event.target.checked);
+                    try {
+                      if (event.target.checked)
+                        localStorage.removeItem("sim-studio:controls-help-hidden");
+                      else localStorage.setItem("sim-studio:controls-help-hidden", "1");
+                    } catch {}
+                  }}
+                />
+              </label>
+              <label className="settings-row">
+                <span>
+                  {t.settingsGizmoScale} · {gizmoScale.toFixed(1)}×
+                </span>
+                <input
+                  type="range"
+                  min={0.5}
+                  max={2}
+                  step={0.1}
+                  value={gizmoScale}
+                  onChange={(event) => setGizmoScale(Number(event.target.value))}
+                />
+              </label>
+              <label className="settings-row">
+                <span>
+                  {t.settingsGizmoThickness} · {gizmoThickness.toFixed(1)}×
+                </span>
+                <input
+                  type="range"
+                  min={0.5}
+                  max={2.5}
+                  step={0.1}
+                  value={gizmoThickness}
+                  onChange={(event) => setGizmoThickness(Number(event.target.value))}
+                />
+              </label>
+              <div className="settings-row">
+                <span>{t.settingsTheme}</span>
+                <div className="settings-choice">
+                  <button
+                    type="button"
+                    className={theme === "light" ? "active" : ""}
+                    onClick={() => setTheme("light")}
+                  >
+                    {t.themeLight}
+                  </button>
+                  <button
+                    type="button"
+                    className={theme === "dark" ? "active" : ""}
+                    onClick={() => setTheme("dark")}
+                  >
+                    {t.themeDark}
+                  </button>
+                </div>
+              </div>
+              <h3>{t.settingsSystem}</h3>
+              <p className="settings-help">{t.reloadAllModelsHelp}</p>
+              <button
+                type="button"
+                className="primary settings-reload"
+                disabled={running}
+                onClick={() => {
+                  setSettingsOpen(false);
+                  void forceReloadModels(true);
+                }}
+              >
+                {t.reloadAllModels}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
       {mapUpdatesOpen && (
         <div className="project-backdrop map-update-backdrop" role="presentation">
           <section
@@ -13739,6 +13991,14 @@ export default function Home() {
                   <b>{selected.catalogQuery}</b>
                 </div>
               )}
+              <button
+                type="button"
+                className="ghost force-reload-button"
+                disabled={running}
+                onClick={() => void forceReloadModels(false)}
+              >
+                {t.forceReload}
+              </button>
               <div className="data-row">
                 <span>
                   {language === "es"

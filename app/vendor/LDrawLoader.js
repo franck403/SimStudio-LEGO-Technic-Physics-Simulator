@@ -2069,6 +2069,14 @@ class LDrawLoader extends Loader {
 	 * @param {Object<string,string>} fileMap - The file map to set.
 	 * @return {LDrawLoader} A reference to this loader.
 	 */
+	// Drops this instance's parsed-geometry cache (used by "force reload").
+	resetCaches() {
+
+		this.partsCache = new LDrawPartsGeometryCache( this );
+		this.missingFiles.clear();
+
+	}
+
 	setFileMap( fileMap ) {
 
 		this.fileMap = fileMap;
@@ -2565,4 +2573,13 @@ class LDrawLoader extends Loader {
 
 }
 
-export { LDrawLoader };
+// Forgets every downloaded / known-missing file so the next load hits the network.
+function clearLDrawCaches() {
+
+	globalLDrawTextCache.clear();
+	globalLDrawMissCache.clear();
+	globalLDrawBadUrls.clear();
+
+}
+
+export { LDrawLoader, clearLDrawCaches };

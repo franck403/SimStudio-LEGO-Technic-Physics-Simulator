@@ -409,6 +409,8 @@ export type AppState = {
   ) => Promise<Piece | null>;
   preloadPart: (part: CatalogPart) => Promise<void>;
   recolorPart: (piece: Piece, color: number) => Promise<boolean>;
+  /** Clears LDraw caches and re-downloads the model of the given pieces. */
+  forceReloadParts: (pieces: Piece[]) => Promise<number>;
   renderImportPreview: (parts: PreparedImportPlacement[]) => Promise<string>;
   verifyConnections: () => number;
   verifyConnectionsAsync: () => Promise<number>;
