@@ -473,6 +473,41 @@ const hasRenderableMesh = (object: THREE.Object3D) => {
   return ok;
 };
 
+// The static (GitHub Pages) build has no /api/parts route, so part numbers
+// are also resolved straight from the public LDraw part libraries.
+const fetchLDrawFileInfo = async (
+  id: string,
+  depth = 0,
+): Promise<{ part: string; name: string } | undefined> => {
+  for (const base of [LDRAW, LEGACY_LDRAW]) {
+    try {
+      const response = await fetch(`${base}parts/${id}.dat`);
+      if (!response.ok) continue;
+      const text = await response.text();
+      const moved = text.match(/^0\s+~Moved to\s+(\S+)/im);
+      if (moved && depth < 3)
+        return fetchLDrawFileInfo(moved[1].toLowerCase().replace(/\.dat$/, ""), depth + 1);
+      const title = text
+        .split(/\r?\n/)
+        .find((line) => /^0\s+\S/.test(line))
+        ?.replace(/^0\s+/, "")
+        .replace(/^[=~_|]+\s*/, "")
+        .trim();
+      return { part: id, name: title || `LDraw part ${id}` };
+    } catch {}
+  }
+};
+
+const lookupLDrawParts = async (id: string) => {
+  const files = await Promise.all(
+    partFileCandidates(id).map((candidate) => fetchLDrawFileInfo(candidate)),
+  );
+  return files.filter(
+    (file, index, all): file is { part: string; name: string } =>
+      !!file && all.findIndex((other) => other?.part === file.part) === index,
+  );
+};
+
 const frictionPinRefs = new Set(["2780", "6558", "32054", "43093"]);
 
 const isPinPart = (p: CatalogPart) =>
@@ -1970,11 +2005,17 @@ export default function Home() {
             const lane = lanes[cursor++ % lanes.length],
               result = lane.tail.then(async () => {
                 await Promise.all([lane.loader.materials, fileMapPromise]);
-                return withTimeout(
+                const tracker = lane.loader.instance as unknown as {
+                  missingFiles?: Set<string>;
+                };
+                tracker.missingFiles?.clear();
+                const group = await withTimeout(
                   lane.loader.instance.loadAsync(source),
                   MODEL_LOAD_TIMEOUT,
                   label,
                 );
+                group.userData.missingSubfiles = tracker.missingFiles?.size ?? 0;
+                return group;
               });
             lane.tail = result.then(
               () => undefined,
@@ -2065,6 +2106,17 @@ export default function Home() {
           ] as const;
           // Try every LDraw file of this part number (modelPart first, then its
           // a/b/c/c01 siblings) on both libraries; skip empty or broken meshes.
+          // A library that lacks some sub-files still "loads" (empty fallbacks),
+          // leaving only part of the model. Prefer a complete load; otherwise
+          // keep the least incomplete one instead of an arbitrary first hit.
+          let partial:
+            | {
+                object: THREE.Object3D;
+                missing: number;
+                downloadUrl: string;
+                downloadSource: "primary" | "legacy";
+              }
+            | undefined;
           candidates: for (const file of partFileCandidates(p.modelPart ?? p.part)) {
             const source = `data:text/plain;charset=utf-8,${encodeURIComponent(
               modelTextFor({ ...p, color: sourceColor }, file),
@@ -2075,6 +2127,17 @@ export default function Home() {
                   await pool.load(source, `La pieza ${p.part}`),
                 );
                 if (!hasRenderableMesh(loaded)) throw new Error(`${file}.dat is empty`);
+                const missing = Number(loaded.userData.missingSubfiles ?? 0);
+                if (missing > 0) {
+                  if (!partial || missing < partial.missing)
+                    partial = {
+                      object: loaded,
+                      missing,
+                      downloadUrl: `${base}parts/${file}.dat`,
+                      downloadSource: kind,
+                    };
+                  continue;
+                }
                 exact = loaded;
                 const loadedSource = {
                   downloadUrl: `${base}parts/${file}.dat`,
@@ -2087,6 +2150,18 @@ export default function Home() {
                 firstError ??= error;
               }
             }
+            // Variant files (a/b/c...) only replace a missing/empty main file,
+            // never an incomplete one: stop with the best partial load.
+            if (partial) break;
+          }
+          if (!exact && partial) {
+            exact = partial.object;
+            const loadedSource = {
+              downloadUrl: partial.downloadUrl,
+              downloadSource: partial.downloadSource,
+            };
+            Object.assign(p, loadedSource);
+            modelSourceCache.set(sourceKey, loadedSource);
           }
           if (!exact) throw firstError ?? new Error(`No LDraw file for ${p.part}`);
         }
@@ -9611,27 +9686,46 @@ export default function Home() {
           resolvedPart: part,
           catalogQuery: part,
         };
-    if (!packaged)
-      try {
-        const d = (await fetch(`/api/parts?q=${encodeURIComponent(part)}`).then((r) =>
-          r.json(),
-        )) as { items?: CatalogPart[] };
-        const exact = d.items?.find(
-          (x: { part: string }) => x.part.toLowerCase() === normalizedPart,
+    if (!packaged) {
+        try {
+          const d = (await fetch(`/api/parts?q=${encodeURIComponent(part)}`).then((r) =>
+            r.json(),
+          )) as { items?: CatalogPart[] };
+          const exact = d.items?.find(
+            (x: { part: string }) => x.part.toLowerCase() === normalizedPart,
+          );
+          if (exact)
+            found = {
+              ...exact,
+              kind: kindFor("", exact.name),
+              color: exact.color ?? 71,
+              origin: "catalog-search",
+              sourceKind: exact.geometry ? "packaged-cache" : "external-catalog",
+              requestedPart: part,
+              catalogReturnedPart: exact.part,
+              resolvedPart: exact.modelPart ?? exact.part,
+              catalogQuery: part,
+            };
+        } catch {}
+      if (found.name === `Pieza LDraw ${part}`) {
+        const direct = (await lookupLDrawParts(part).catch(() => [])).find(
+          (item) => item.part.toLowerCase() === normalizedPart,
         );
-        if (exact)
+        if (direct)
           found = {
-            ...exact,
-            kind: kindFor("", exact.name),
-            color: exact.color ?? 71,
+            part: direct.part,
+            name: direct.name,
+            kind: kindFor("", direct.name),
+            color: 71,
             origin: "catalog-search",
-            sourceKind: exact.geometry ? "packaged-cache" : "external-catalog",
+            sourceKind: "ldraw-network",
             requestedPart: part,
-            catalogReturnedPart: exact.part,
-            resolvedPart: exact.modelPart ?? exact.part,
+            catalogReturnedPart: direct.part,
+            resolvedPart: direct.part,
             catalogQuery: part,
           };
-      } catch {}
+      }
+    }
     if (!belongsToDefaultPalette(found)) {
       setImported((old) =>
         old.some((x) => x.part === found.part) ? old : [found, ...old],
@@ -9675,12 +9769,14 @@ export default function Home() {
           resolvedPart: packaged.modelPart ?? packaged.part,
           catalogQuery: part,
         });
+    let networkFound = false;
     try {
       const d = (await fetch(`/api/parts?q=${encodeURIComponent(part)}`).then((r) =>
         r.json(),
       )) as { items?: CatalogPart[] };
       for (const item of d.items ?? [])
-        if (isSamePartFamily(item.part, stems) && !found.some((x) => x.part === item.part))
+        if (isSamePartFamily(item.part, stems) && !found.some((x) => x.part === item.part)) {
+          networkFound = true;
           push({
             ...item,
             kind: kindFor("", item.name),
@@ -9692,7 +9788,24 @@ export default function Home() {
             resolvedPart: item.modelPart ?? item.part,
             catalogQuery: part,
           });
+        }
     } catch {}
+    if (!networkFound)
+      for (const stem of stems)
+        for (const item of await lookupLDrawParts(stem).catch(() => []))
+          if (!found.some((x) => x.part === item.part))
+            push({
+              part: item.part,
+              name: item.name,
+              kind: kindFor("", item.name),
+              color: 71,
+              origin: "catalog-search",
+              sourceKind: "ldraw-network",
+              requestedPart: part,
+              catalogReturnedPart: item.part,
+              resolvedPart: item.part,
+              catalogQuery: part,
+            });
     setCatalogBusy(false);
     setSearch("");
     const exactRank = (candidate: CatalogPart) =>

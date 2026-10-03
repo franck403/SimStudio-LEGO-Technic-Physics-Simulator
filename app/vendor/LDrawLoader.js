@@ -515,6 +515,8 @@ class LineParser {
 
 // Fetches and parses an intermediate representation of LDraw parts files.
 const globalLDrawTextCache = new Map();
+// Cache keys of sub-files that a given library could not provide.
+const globalLDrawMissCache = new Set();
 
 class LDrawParsedCache {
 
@@ -582,8 +584,12 @@ class LDrawParsedCache {
 	async fetchData( fileName ) {
 
 		fileName = ( fileName || '' ).replace( /\\/g, '/' ).trim();
-		const cacheKey = fileName.toLowerCase();
+		const lowerName = fileName.toLowerCase();
+		// The cache is per parts library: a sub-file that one library lacks (and
+		// answers with an empty fallback) must not hide the real file in another.
+		const cacheKey = ( this.loader.partsLibraryPath || '' ) + '|' + lowerName;
 		if ( globalLDrawTextCache.has( cacheKey ) ) {
+			if ( globalLDrawMissCache.has( cacheKey ) && this.loader.missingFiles ) this.loader.missingFiles.add( lowerName );
 			return globalLDrawTextCache.get( cacheKey );
 		}
 
@@ -596,10 +602,10 @@ class LDrawParsedCache {
 		// Check fileMap first for ultra-fast 1-shot loading
 		const mapped = loader.fileMap && (
 			loader.fileMap[ fileName ] ||
-			loader.fileMap[ cacheKey ] ||
-			loader.fileMap[ cacheKey + '.dat' ] ||
-			loader.fileMap[ 'parts/' + cacheKey ] ||
-			loader.fileMap[ 'p/' + cacheKey ]
+			loader.fileMap[ lowerName ] ||
+			loader.fileMap[ lowerName + '.dat' ] ||
+			loader.fileMap[ 'parts/' + lowerName ] ||
+			loader.fileMap[ 'p/' + lowerName ]
 		);
 
 		if ( mapped ) {
@@ -611,14 +617,14 @@ class LDrawParsedCache {
 		}
 
 		// Instant Spike alias resolution
-		if ( cacheKey === 'sg1' || cacheKey === 'sg1.dat' || cacheKey === 's/sg1.dat' || cacheKey === 's/sg1' ) {
+		if ( lowerName === 'sg1' || lowerName === 'sg1.dat' || lowerName === 's/sg1.dat' || lowerName === 's/sg1' ) {
 			try {
 				const text = await fileLoader.loadAsync( 'parts/68488.dat' );
 				globalLDrawTextCache.set( cacheKey, text );
 				return text;
 			} catch ( _ ) {}
 		}
-		if ( cacheKey === '68487' || cacheKey === '68487.dat' ) {
+		if ( lowerName === '68487' || lowerName === '68487.dat' ) {
 			try {
 				const text = await fileLoader.loadAsync( 'parts/54676.dat' );
 				globalLDrawTextCache.set( cacheKey, text );
@@ -626,13 +632,6 @@ class LDrawParsedCache {
 			} catch ( _ ) {}
 		}
 
-		// If fileMap is loaded and this subpart is unknown, return fast non-blocking fallback immediately
-		// rather than doing 8 sequential failing HTTP 404 network requests
-		if ( loader.fileMap && Object.keys( loader.fileMap ).length > 50 ) {
-			const fallbackText = '0 // Fallback for ' + fileName + '\n';
-			globalLDrawTextCache.set( cacheKey, fallbackText );
-			return fallbackText;
-		}
 
 		let triedLowerCase = false;
 		let locationState = FILE_LOCATION_TRY_PARTS;
@@ -703,6 +702,8 @@ class LDrawParsedCache {
 		// Graceful fallback for missing subobjects so models never fail to render
 		const fallbackText = '0 // Fallback for ' + fileName + '\n';
 		globalLDrawTextCache.set( cacheKey, fallbackText );
+		globalLDrawMissCache.add( cacheKey );
+		if ( this.loader.missingFiles ) this.loader.missingFiles.add( lowerName );
 		return fallbackText;
 
 	}
@@ -1858,6 +1859,9 @@ class LDrawLoader extends Loader {
 
 		// This object is a map from file names to paths. It agilizes the paths search. If it is not set then files will be searched by trial and error.
 		this.fileMap = {};
+
+		// Sub-files the last load could not find (used to prefer a complete library).
+		this.missingFiles = new Set();
 
 		// If this flag is set to true the vertex normals will be smoothed.
 		this.smoothNormals = true;
