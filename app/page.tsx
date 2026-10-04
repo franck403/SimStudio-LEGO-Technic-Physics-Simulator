@@ -1304,6 +1304,34 @@ export default function Home() {
   const [mapUpdatesOpen, setMapUpdatesOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [busy, setBusy] = useState<{
+    label: string;
+    progress?: number;
+    cancel?: () => void;
+  } | null>(null);
+  const busyRef = useRef(false);
+  const [videoOpen, setVideoOpen] = useState(false);
+  const [videoOptions, setVideoOptions] = useState({
+    format: "mp4" as "mp4" | "gif",
+    width: 1280,
+    fps: 30,
+    repeats: 1,
+  });
+  // Runs a slow task behind the blocking overlay; ignores re-entry while busy.
+  const blocking =
+    <A extends unknown[], R>(label: string, task: (...args: A) => Promise<R>) =>
+    async (...args: A): Promise<R | undefined> => {
+      if (busyRef.current) return undefined;
+      busyRef.current = true;
+      setBusy({ label });
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      try {
+        return await task(...args);
+      } finally {
+        busyRef.current = false;
+        setBusy(null);
+      }
+    };
   const [timelineOpen, setTimelineOpen] = useState(false);
   const [animRev, setAnimRev] = useState(0);
   const [animTime, setAnimTime] = useState(0);
@@ -10208,6 +10236,13 @@ export default function Home() {
         renderer.render(scene, camera);
       }
       if (gpuQuery && gpuTimerExtension) gl.endQuery(gpuTimerExtension.TIME_ELAPSED_EXT);
+      if (state.afterRender) {
+        // Frame capture for video/GIF export runs in the same task as the draw,
+        // while the canvas still holds the finished frame.
+        const capture = state.afterRender;
+        state.afterRender = undefined;
+        capture(gpuViewportCanvas.classList.contains("active") ? gpuViewportCanvas : renderer.domElement);
+      }
       const renderMs = performance.now() - phaseStarted,
         trace = state.performanceTrace,
         sample: FramePerformanceSample = {
@@ -10828,7 +10863,7 @@ export default function Home() {
     );
   };
 
-  const forceReloadModels = async (all: boolean) => {
+  const forceReloadModelsRaw = async (all: boolean) => {
     const s = appRef.current;
     if (!s || running) return;
     const base = s.selected,
@@ -11219,7 +11254,7 @@ export default function Home() {
 
   // --- LDraw / Studio import and export ------------------------------------
 
-  const importModel = async (file: File) => {
+  const importModelRaw = async (file: File) => {
     const s = appRef.current;
     if (!s || s.running || physicsTransitionRef.current) return;
     const empty: ImportDraft = {
@@ -11812,7 +11847,7 @@ export default function Home() {
     touchAnimation();
     if (previewActive) seekAnimation(animTimeRef.current);
   };
-  const exportGlb = async () => {
+  const exportGlbRaw = async () => {
     const s = appRef.current;
     if (!s || exportBusy) return;
     setExportBusy(true);
@@ -11852,7 +11887,7 @@ export default function Home() {
     link.click();
     window.setTimeout(() => URL.revokeObjectURL(url), 4000);
   };
-  const runFixer = async () => {
+  const runFixerRaw = async () => {
     const s = appRef.current;
     if (!s || fixerBusy || running) return;
     setFixerBusy(true);
@@ -11872,7 +11907,7 @@ export default function Home() {
       setFixerBusy(false);
     }
   };
-  const replaceParts = async () => {
+  const replacePartsRaw = async () => {
     const s = appRef.current;
     if (!s || fixerBusy || running) return;
     const from = replaceFrom.trim().toLowerCase(),
@@ -11954,6 +11989,75 @@ export default function Home() {
       };
     });
   })();
+
+  // Everything slow runs behind a blocking overlay so the editor cannot be
+  // changed (or a second heavy job started) while it works.
+  const importModel = blocking(t.busyImport, (file: File) => importModelRaw(file));
+  const performImportProject = blocking(t.busyProject, (document: SimStudioProjectDocument) =>
+    performImportProjectRaw(document),
+  );
+  const importProjectFile = blocking(t.busyProject, (file: File) => importProjectFileRaw(file));
+  const importStl = blocking(t.stlLoading, (files: File[]) => importStlRaw(files));
+  const forceReloadModels = blocking(t.forceReloading, (all: boolean) => forceReloadModelsRaw(all));
+  const runFixer = blocking(t.fixerRunning, () => runFixerRaw());
+  const replaceParts = blocking(t.fixerRunning, () => replacePartsRaw());
+  const exportGlb = blocking(t.busyExport, () => exportGlbRaw());
+  const performOpenSavedProject = blocking(t.busyProject, (id: string) => performOpenSavedProjectRaw(id));
+
+  const exportVideoFile = async () => {
+    const s = appRef.current;
+    if (!s || busyRef.current) return;
+    const mod = await import("./export-video");
+    if (videoOptions.format === "mp4" && !mod.videoSupported()) {
+      setMessage(t.videoNoWebCodecs);
+      return;
+    }
+    setVideoOpen(false);
+    let cancelled = false;
+    busyRef.current = true;
+    setBusy({ label: t.busyVideo, progress: 0, cancel: () => (cancelled = true) });
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    const resumeAt = animTimeRef.current,
+      canvasBox = s.renderer.domElement.getBoundingClientRect();
+    try {
+      setAnimPlaying(false);
+      const blob = await mod.encodeVideo({
+        duration: s.animation.duration,
+        options: videoOptions,
+        aspect: Math.max(0.2, canvasBox.width / Math.max(1, canvasBox.height)),
+        isCancelled: () => cancelled,
+        onProgress: (fraction) => setBusy((b) => (b ? { ...b, progress: fraction } : b)),
+        renderFrame: (time, ctx, w, h) =>
+          new Promise<void>((resolve, reject) => {
+            const timer = window.setTimeout(() => reject(new Error("Render timed out")), 4000);
+            s.setPreviewTime(time);
+            s.afterRender = (canvas) => {
+              window.clearTimeout(timer);
+              ctx.drawImage(canvas, 0, 0, w, h);
+              resolve();
+            };
+            s.requestRender();
+          }),
+      });
+      if (blob) {
+        const ext = videoOptions.format,
+          name = `${(projectNameRef.current || "animation").replace(/[^\w.-]+/g, "_")}.${ext}`;
+        const url = URL.createObjectURL(blob),
+          link = document.createElement("a");
+        link.href = url;
+        link.download = name;
+        link.click();
+        window.setTimeout(() => URL.revokeObjectURL(url), 8000);
+        setMessage(`${t.exported}: ${name} · ${(blob.size / 1048576).toFixed(1)} MB`);
+      } else setMessage(t.cancelled);
+    } catch (error) {
+      setMessage(`${t.exportFailed}: ${error instanceof Error ? error.message : error}`);
+    } finally {
+      seekAnimation(resumeAt);
+      busyRef.current = false;
+      setBusy(null);
+    }
+  };
 
   const exportModel = () => {
     const s = appRef.current;
@@ -12153,7 +12257,7 @@ export default function Home() {
     );
   };
 
-  const performOpenSavedProject = async (id: string) => {
+  const performOpenSavedProjectRaw = async (id: string) => {
     const state = appRef.current;
     if (!state || running || projectBusy) return;
     setProjectBusy(true);
@@ -12219,7 +12323,7 @@ export default function Home() {
     downloadProjectDocument(state.createProjectDocument());
   };
 
-  const performImportProject = async (document: SimStudioProjectDocument) => {
+  const performImportProjectRaw = async (document: SimStudioProjectDocument) => {
     const state = appRef.current;
     if (!state || running || projectBusy) return;
     setProjectBusy(true);
@@ -12254,7 +12358,7 @@ export default function Home() {
     }
   };
 
-  const importProjectFile = async (file: File) => {
+  const importProjectFileRaw = async (file: File) => {
     if (running || projectBusy) return;
     try {
       const document = decodeProjectFile(await file.arrayBuffer());
@@ -12269,7 +12373,7 @@ export default function Home() {
 
   // STL meshes become ordinary pieces: millimetres -> studs (8 mm), Z-up -> Y-up,
   // centred, with the triangle data stored inside the project like any part.
-  const importStl = async (files: File[]) => {
+  const importStlRaw = async (files: File[]) => {
     const s = appRef.current;
     if (!s || running) return;
     setMessage(t.stlLoading);
@@ -13996,6 +14100,7 @@ export default function Home() {
                         },
                         false,
                       ],
+                      [`🎞 ${t.videoExport}`, () => setVideoOpen(true), false],
                       ["—", null, false],
                       [`🛠 ${t.fixer}`, () => setFixerOpen(true), running],
                       [`⧉ ${t.copy}`, () => appRef.current?.copySelected(), running || !selected],
@@ -14034,6 +14139,124 @@ export default function Home() {
           </div>
         </div>
       </header>
+      {videoOpen && (
+        <div
+          className="project-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setVideoOpen(false);
+          }}
+        >
+          <section className="project-dialog settings-dialog" role="dialog" aria-modal="true">
+            <div className="project-dialog-head">
+              <div>
+                <small>MP4 · GIF</small>
+                <h2>{t.videoExport}</h2>
+              </div>
+              <button className="project-close" onClick={() => setVideoOpen(false)} aria-label={t.close}>
+                ×
+              </button>
+            </div>
+            <div className="settings-body">
+              <p className="settings-help">{t.videoHelp}</p>
+              <div className="settings-row">
+                <span>{t.videoFormat}</span>
+                <div className="settings-choice">
+                  {(["mp4", "gif"] as const).map((format) => (
+                    <button
+                      key={format}
+                      type="button"
+                      className={videoOptions.format === format ? "active" : ""}
+                      onClick={() =>
+                        setVideoOptions({
+                          ...videoOptions,
+                          format,
+                          fps: format === "gif" ? 15 : 30,
+                          width: format === "gif" ? 640 : 1280,
+                        })
+                      }
+                    >
+                      {format.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="settings-row">
+                <span>{t.videoWidth}</span>
+                <div className="settings-choice">
+                  {(videoOptions.format === "gif" ? [320, 480, 640, 800] : [640, 1280, 1920]).map((width) => (
+                    <button
+                      key={width}
+                      type="button"
+                      className={videoOptions.width === width ? "active" : ""}
+                      onClick={() => setVideoOptions({ ...videoOptions, width })}
+                    >
+                      {width}px
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="settings-row">
+                <span>FPS</span>
+                <div className="settings-choice">
+                  {(videoOptions.format === "gif" ? [10, 15, 20] : [24, 30, 60]).map((fps) => (
+                    <button
+                      key={fps}
+                      type="button"
+                      className={videoOptions.fps === fps ? "active" : ""}
+                      onClick={() => setVideoOptions({ ...videoOptions, fps })}
+                    >
+                      {fps}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="settings-row">
+                <span>{t.videoRepeats}</span>
+                <div className="settings-choice">
+                  {[1, 2, 3].map((repeats) => (
+                    <button
+                      key={repeats}
+                      type="button"
+                      className={videoOptions.repeats === repeats ? "active" : ""}
+                      onClick={() => setVideoOptions({ ...videoOptions, repeats })}
+                    >
+                      ×{repeats}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <p className="settings-help">
+                {Math.round((appRef.current?.animation.duration ?? 5) * videoOptions.fps * videoOptions.repeats)} {t.videoFrames}
+              </p>
+              <button type="button" className="primary settings-reload" onClick={() => void exportVideoFile()}>
+                {t.videoRender}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+      {busy && (
+        <div className="busy-overlay" role="alertdialog" aria-live="assertive" aria-busy="true">
+          <div className="busy-card">
+            <div className="busy-spinner" />
+            <b>{busy.label}</b>
+            {busy.progress !== undefined && (
+              <>
+                <div className="busy-bar">
+                  <i style={{ width: `${Math.round(busy.progress * 100)}%` }} />
+                </div>
+                <small>{Math.round(busy.progress * 100)}%</small>
+              </>
+            )}
+            {busy.cancel && (
+              <button type="button" onClick={busy.cancel}>
+                {t.cancel}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
       {timelineOpen && (
         <TimelinePanel
           labels={t as unknown as Record<string, string>}
