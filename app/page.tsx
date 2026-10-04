@@ -14471,6 +14471,12 @@ export default function Home() {
                         </b>
                       </div>
                     </div>
+                    {candidate.layers
+                      .filter((layer) => layer !== "specialGear")
+                      .every((layer) => candidate.localCounts[layer] === candidate.preloadedCounts[layer]) &&
+                      candidate.layers.some((layer) => layer !== "specialGear") && (
+                        <small className="map-update-same">{t.mapSameCount}</small>
+                      )}
                     <div className="map-update-actions">
                       <button
                         className="ghost"

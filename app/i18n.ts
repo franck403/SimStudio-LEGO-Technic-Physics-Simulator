@@ -117,6 +117,8 @@ const enTranslations = {
     "These parts have saved maps that differ from the packaged maps. New packaged changes open this menu automatically.",
   mapUpdatesLight:
     "The check uses small fingerprints; it does not load geometry or 3D models.",
+  mapSameCount:
+    "Same number of entries: the positions, sizes or axes inside differ (for example regenerated or hand-edited), not the count. Update to take the packaged version, keep local to keep yours.",
   localVersion: "Local version",
   preloadedVersion: "New version",
   updateMap: "Update",

@@ -3602,3 +3602,4 @@ body.resizing-inspector * {
 .timeline-menu button:hover{background:rgba(120,160,255,.2)}
 .timeline-menu button.danger{color:#ff6b62}
 .timeline-menu hr{border:0;border-top:1px solid rgba(128,128,128,.3);margin:4px 0}
+.map-update-same{display:block;margin:2px 0 8px;opacity:.75;line-height:1.35}
