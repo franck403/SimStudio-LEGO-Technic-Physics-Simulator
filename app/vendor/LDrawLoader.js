@@ -2077,6 +2077,50 @@ class LDrawLoader extends Loader {
 
 	}
 
+	// Walks the sub-file tree of an LDraw model text and returns every placement of
+	// a sub-file `classify` calls 'hit' (hole / pin primitives) with its matrix in
+	// the model's own coordinate system. The loader merges primitives into their
+	// parent, so this is the only place their exact position and axis survive.
+	async collectSubparts( text, classify ) {
+
+		const parseCache = this.partsCache.parseCache;
+		const found = [];
+		const visit = async ( info, matrix, depth ) => {
+
+			for ( const sub of info.subobjects ) {
+
+				const combined = matrix.clone().multiply( sub.matrix );
+				const verdict = classify( sub.fileName );
+				if ( verdict === 'hit' ) {
+
+					found.push( { fileName: sub.fileName, matrix: combined.toArray() } );
+					continue;
+
+				}
+
+				if ( verdict === 'skip' || depth > 14 ) continue;
+				try {
+
+					await parseCache.ensureDataLoaded( sub.fileName );
+
+				} catch ( error ) {
+
+					continue;
+
+				}
+
+				const child = parseCache.getData( sub.fileName, false );
+				if ( child ) await visit( child, combined, depth + 1 );
+
+			}
+
+		};
+
+		await visit( parseCache.parse( text ), new Matrix4(), 0 );
+		return found;
+
+	}
+
 	setFileMap( fileMap ) {
 
 		this.fileMap = fileMap;

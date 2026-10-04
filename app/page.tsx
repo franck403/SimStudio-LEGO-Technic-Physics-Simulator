@@ -13,11 +13,14 @@ import { LDrawLoader, clearLDrawCaches } from "./vendor/LDrawLoader.js";
 import { LDrawConditionalLineMaterial } from "three/addons/materials/LDrawConditionalLineMaterial.js";
 import { ldrawToScenePlacement, makeLDR, parseLDR, type LDrawPlacement } from "./ldraw";
 import { flattenLDrawRenderables } from "./ldraw-geometry";
+import { createLDrawWorkerPool, WorkerUnavailable } from "./ldraw-worker-client";
+import { mergeSubpartConnectors, subpartConnectors, type SubpartHit } from "./ldraw-subparts";
 import { extractStudioLDraw } from "./studio-io";
 import {
   approximateCollisionPrimitives,
   approximateGearCollisionPrimitives,
   generatePartConnectors,
+  lastDetectionExpired,
   straightAxleCollisionPrimitives,
   straightAxleConnectors,
   type CollisionPrimitive,
@@ -2086,6 +2089,35 @@ export default function Home() {
       officialPool = makeLoaderPool(OFFICIAL_LDRAW, 2),
       primary = primaryPool.primary,
       legacy = legacyPool.primary;
+    // Parsing runs in Web Workers; the main-thread loaders above stay as the
+    // fallback (no Worker support, worker crash) and provide the materials.
+    const ldrawWorkers = createLDrawWorkerPool({
+      size: Math.min(4, Math.max(2, (navigator.hardwareConcurrency || 4) - 1)),
+      libraries: [LDRAW, LEGACY_LDRAW, MIRROR_LDRAW, OFFICIAL_LDRAW],
+      fileMap: fileMapPromise,
+      timeout: MODEL_LOAD_TIMEOUT,
+    });
+    const moveToWorker = (pool: ReturnType<typeof makeLoaderPool>, base: string) => {
+      const mainThreadLoad = pool.load.bind(pool),
+        mainThreadReset = pool.reset.bind(pool);
+      pool.load = async (source: string, label: string) => {
+        if (ldrawWorkers.available)
+          try {
+            return (await ldrawWorkers.load(base, source, label)) as THREE.Group;
+          } catch (error) {
+            if (!(error instanceof WorkerUnavailable)) throw error;
+          }
+        return mainThreadLoad(source, label);
+      };
+      pool.reset = () => {
+        mainThreadReset();
+        ldrawWorkers.reset();
+      };
+    };
+    moveToWorker(primaryPool, LDRAW);
+    moveToWorker(legacyPool, LEGACY_LDRAW);
+    moveToWorker(mirrorPool, MIRROR_LDRAW);
+    moveToWorker(officialPool, OFFICIAL_LDRAW);
     // LDraw headers carry "UPDATE yyyy-mm". Libraries are mirrors of different
     // age, so the one whose main file is newest is tried first (an old copy
     // may predate the sub-parts a newer official file relies on).
@@ -2440,7 +2472,29 @@ export default function Home() {
           cloneConnectors(connectorCache.get(correctionStorageKey)!);
       if (!connectors) {
         connectors = generatePartConnectors(wrapper, p.name);
+        // Hole primitives read straight from the LDraw files fill in what the
+        // mesh search missed (dense parts such as the Spike motors).
+        const subpartHits = (wrapper.children[0]?.userData.subpartHits ?? []) as SubpartHit[];
+        if (subpartHits.length)
+          connectors = [
+            ...connectors,
+            ...mergeSubpartConnectors(connectors, subpartConnectors(subpartHits)).map(
+              (extra) => ({
+                local: new THREE.Vector3(...extra.local),
+                axis: new THREE.Vector3(...extra.axis),
+                kind: extra.kind,
+                role: extra.role,
+                diameter: extra.diameter,
+                length: extra.length,
+              }),
+            ),
+          ];
         mapProvenance.connectors = automaticMapProvenance();
+        // A search that ran out of time, or a model with missing sub-files, is
+        // incomplete: keep it for this session only so a later load can redo it.
+        const incomplete =
+          lastDetectionExpired || Number(wrapper.children[0]?.userData.missingSubfiles ?? 0) > 0;
+        if (!incomplete)
         try {
           localStorage.setItem(
             `sim-connectors-v4:${correctionStorageKey}`,

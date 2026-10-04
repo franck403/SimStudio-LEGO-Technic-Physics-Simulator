@@ -15,6 +15,7 @@ import type {
   RustPhysicsRuntime,
 } from "../physics/rust-runtime";
 import type { JsonObject, SimStudioProjectDocument } from "../project-format";
+import type { AnimationDoc, GroupDef } from "../animation";
 
 export type PieceKind = "beam" | "wheel" | "motor";
 
@@ -70,6 +71,8 @@ export type Piece = CatalogPart & {
   /** Components that move/select together in the editor but remain separate physics bodies. */
   editorAssemblyId?: string;
   editorAssemblyDetached?: boolean;
+  /** User group: parts sharing an id select, move and animate together. */
+  groupId?: string;
   /** Centre connector (0/1) whose end is the Cardan editor's input/reference. */
   editorCardanReferenceConnector?: 0 | 1;
   rotationPivotLocal?: THREE.Vector3;
@@ -100,6 +103,7 @@ export type EditorPieceSnapshot = {
   dynamicAxleConnections: boolean;
   editorAssemblyId?: string;
   editorAssemblyDetached?: boolean;
+  groupId?: string;
   editorCardanReferenceConnector?: 0 | 1;
   rotationPivotLocal?: THREE.Vector3;
   rotationPivotKey?: string;
@@ -118,6 +122,8 @@ export type EditorSnapshot = {
   connectionModes: AppState["connectionModes"];
   selected?: Piece;
   selectedPieces?: Piece[];
+  groups?: GroupDef[];
+  animation?: AnimationDoc;
 };
 
 export type RenderBatchItem = {
@@ -348,6 +354,10 @@ export type AppState = {
   axleSnapStep: AxleSnapStep;
   rotationSnapStep: RotationSnapStep;
   pieces: Piece[];
+  /** User groups (parts that move and animate together). */
+  groups: GroupDef[];
+  /** Keyframe animation of groups and parts. */
+  animation: AnimationDoc;
   selected?: Piece;
   selectedPieces: Set<Piece>;
   running: boolean;

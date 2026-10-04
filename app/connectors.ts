@@ -82,7 +82,11 @@ export function objectLocalTrimesh(root: THREE.Object3D): LocalTrimesh {
   };
 }
 
+/** True when the last hole search ran out of its time budget (result is partial). */
+export let lastDetectionExpired = false;
+
 export function detectConnectorHoles(root: THREE.Object3D): MeshConnector[] {
+  lastDetectionExpired = false;
   const data = objectLocalTrimesh(root);
   if (!data.vertices.length) return [];
   const geometry = new THREE.BufferGeometry();
@@ -133,6 +137,7 @@ export function detectConnectorHoles(root: THREE.Object3D): MeshConnector[] {
   try {
     return detectAxisAlignedHoles(root, profile, expired);
   } finally {
+    lastDetectionExpired = expired();
     geometry.dispose();
     material.dispose();
   }

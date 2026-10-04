@@ -3,6 +3,12 @@ import {
   normalizeMapProvenanceSnapshot,
   type MapProvenanceSnapshot,
 } from "./map-provenance";
+import {
+  sanitizeAnimation,
+  sanitizeGroups,
+  type AnimationDoc,
+  type GroupDef,
+} from "./animation.ts";
 
 export const PROJECT_EXTENSION = ".simstudio";
 export const PROJECT_MIME = "application/x-simstudio-project";
@@ -66,6 +72,8 @@ export type SavedPiece = {
   dynamicAxleConnections: boolean;
   editorAssemblyId?: string;
   editorAssemblyDetached?: boolean;
+  /** User group (see `groups` on the document). */
+  groupId?: string;
   editorCardanReferenceConnector?: 0 | 1;
   rotationPivotLocal?: [number, number, number];
   rotationPivotKey?: string;
@@ -150,6 +158,10 @@ export type SimStudioProjectDocument = {
   connections: SavedConnection[];
   gearLinks: SavedGearLink[];
   rubberBands?: SavedRubberBand[];
+  /** Part groups that move together. Optional: older projects have none. */
+  groups?: GroupDef[];
+  /** Keyframe animation; piece tracks use the saved piece ids ("piece-N"). */
+  animation?: AnimationDoc;
   /** Fingerprints of the packaged maps that embedded part maps were based on. */
   mapBaselines?: Record<string, SavedMapBaseline>;
   importedCatalog: JsonObject[];
@@ -392,6 +404,8 @@ const sanitizeProjectDocument = (
             ? piece.editorAssemblyId
             : undefined,
         editorAssemblyDetached: piece.editorAssemblyDetached === true || undefined,
+        groupId:
+          typeof piece.groupId === "string" && piece.groupId ? piece.groupId : undefined,
         editorCardanReferenceConnector:
           piece.editorCardanReferenceConnector === 1
             ? 1
@@ -620,6 +634,8 @@ const sanitizeProjectDocument = (
     connections,
     gearLinks,
     rubberBands,
+    groups: Array.isArray(document.groups) ? sanitizeGroups(document.groups) : undefined,
+    animation: document.animation ? sanitizeAnimation(document.animation) : undefined,
     mapBaselines: Object.keys(mapBaselines).length ? mapBaselines : undefined,
     importedCatalog: Array.isArray(document.importedCatalog)
       ? document.importedCatalog.filter(
