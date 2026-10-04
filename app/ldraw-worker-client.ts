@@ -23,6 +23,7 @@ export function createLDrawWorkerPool(options: {
   size: number;
   libraries: string[];
   fileMap: Promise<Record<string, string> | null>;
+  configUrl: string;
   timeout: number;
 }) {
   let broken = typeof Worker === "undefined";
@@ -77,7 +78,12 @@ export function createLDrawWorkerPool(options: {
         };
         workers.push(worker);
         void options.fileMap.then((fileMap) =>
-          worker.postMessage({ type: "init", fileMap, libraries: options.libraries }),
+          worker.postMessage({
+            type: "init",
+            fileMap,
+            libraries: options.libraries,
+            configUrl: options.configUrl,
+          }),
         );
       }
     } catch (error) {

@@ -12,14 +12,20 @@ import { LDrawConditionalLineMaterial } from "three/addons/materials/LDrawCondit
 import { flattenLDrawRenderables } from "../ldraw-geometry";
 import { classifySubpart } from "../ldraw-subparts";
 
-type Init = { type: "init"; fileMap: Record<string, string> | null; libraries: string[] };
+type Init = {
+  type: "init";
+  fileMap: Record<string, string> | null;
+  libraries: string[];
+  configUrl?: string;
+};
 type Load = { type: "load"; id: number; base: string; source: string };
 type Reset = { type: "reset" };
 type Message = Init | Load | Reset;
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 let fileMap: Record<string, string> | null = null,
-  libraries: string[] = [];
+  libraries: string[] = [],
+  configUrl: string | undefined;
 
 type Lane = { instance: LDrawLoader; ready: Promise<unknown>; tail: Promise<unknown> };
 const lanes = new Map<string, Lane>();
@@ -34,8 +40,9 @@ const laneFor = (base: string): Lane => {
     (library) => library !== base,
   );
   if (fileMap) instance.setFileMap(fileMap);
-  const ready = instance
-    .preloadMaterials(base + "LDConfig.ldr")
+  // Local copy first: library.ldraw.org sends no CORS headers.
+  const ready = (configUrl ? instance.preloadMaterials(configUrl) : Promise.reject())
+    .catch(() => (base.includes("library.ldraw.org") ? undefined : instance.preloadMaterials(base + "LDConfig.ldr")))
     .catch(() => undefined);
   lane = { instance, ready, tail: Promise.resolve() };
   lanes.set(base, lane);
@@ -73,6 +80,7 @@ scope.onmessage = (event: MessageEvent<Message>) => {
   if (message.type === "init") {
     fileMap = message.fileMap;
     libraries = message.libraries;
+    configUrl = message.configUrl;
     lanes.forEach((lane) => fileMap && lane.instance.setFileMap(fileMap));
     return;
   }

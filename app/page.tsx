@@ -2096,7 +2096,7 @@ export default function Home() {
           );
         }),
       fileMapPromise = typeof window !== "undefined"
-        ? fetch("/ldraw/file-map.json")
+        ? fetch(new URL("ldraw/file-map.json", document.baseURI).href)
             .then((r) => (r.ok ? r.json() : null))
             .catch(() => null)
         : Promise.resolve(null),
@@ -2113,9 +2113,15 @@ export default function Home() {
         void fileMapPromise.then((map) => {
           if (map) instance.setFileMap(map);
         });
-        const configUrl = typeof window !== "undefined" ? "/ldraw/LDConfig.ldr" : base + "LDConfig.ldr";
+        const configUrl =
+          typeof window !== "undefined"
+            ? new URL("ldraw/LDConfig.ldr", document.baseURI).href
+            : base + "LDConfig.ldr";
         const materials = withTimeout(
-          instance.preloadMaterials(configUrl).catch(() => instance.preloadMaterials(base + "LDConfig.ldr")),
+          instance.preloadMaterials(configUrl).catch(() =>
+            // library.ldraw.org sends no CORS headers, so never fall back to it.
+            base === OFFICIAL_LDRAW ? undefined : instance.preloadMaterials(base + "LDConfig.ldr"),
+          ),
           10_000,
           "LDraw materials palette",
         ).catch(() => undefined);
@@ -2169,6 +2175,7 @@ export default function Home() {
     const ldrawWorkers = createLDrawWorkerPool({
       size: Math.min(4, Math.max(2, (navigator.hardwareConcurrency || 4) - 1)),
       libraries: [LDRAW, LEGACY_LDRAW, MIRROR_LDRAW, OFFICIAL_LDRAW],
+      configUrl: new URL("ldraw/LDConfig.ldr", document.baseURI).href,
       fileMap: fileMapPromise,
       timeout: MODEL_LOAD_TIMEOUT,
     });
