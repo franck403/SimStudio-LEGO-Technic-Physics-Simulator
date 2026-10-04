@@ -11609,14 +11609,49 @@ export default function Home() {
     }
     return track;
   };
+  // Keying a single part must carry what is rigidly attached to it (a gear on
+  // an axle, a part pinned fixed): those parts are grouped with it first.
+  const promoteToCluster = (target: TrackTarget & { label: string }) => {
+    const s = appRef.current,
+      anchor = s?.selected;
+    if (!s || !anchor || target.kind !== "piece" || anchor.groupId) return target;
+    const cluster = new Set<Piece>([anchor]),
+      queue = [anchor];
+    while (queue.length) {
+      const current = queue.shift()!;
+      for (const c of s.connections) {
+        if (c.a !== current && c.b !== current) continue;
+        if (c.mode !== "fixed" && c.profile !== "axle-cross") continue;
+        const other = c.a === current ? c.b : c.a;
+        if (other.groupId || cluster.has(other)) continue;
+        cluster.add(other);
+        queue.push(other);
+      }
+    }
+    if (cluster.size < 2) return target;
+    const rest = s.previewRest,
+      current = rest ? captureRest(s.pieces) : null;
+    if (rest) restoreRest(rest); // pivot must be the rest position
+    const group = createGroup([...cluster], s.groups, `${anchor.part} +${cluster.size - 1}`);
+    if (current) restoreRest(current);
+    if (!group) return target;
+    group.pivot = (rest?.get(anchor)?.position ?? anchor.mesh.position).toArray() as [number, number, number];
+    s.animation.tracks.forEach((track) => {
+      if (track.target.kind === "piece" && track.target.id === target.id)
+        track.target = { kind: "group", id: group.id };
+    });
+    setMessage(`${t.groupCreated}: ${group.name}`);
+    return { kind: "group" as const, id: group.id, label: group.name };
+  };
   // Records where the selected group/part is RIGHT NOW as a key at the current
   // time: move it with the gizmo, then press Add key.
   const captureKey = () => {
     const s = appRef.current,
-      target = animationTarget(),
+      base = animationTarget(),
       anchor = s?.selected;
-    if (!s || !target || !anchor) return;
+    if (!s || !base || !anchor) return;
     if (!s.previewRest) s.setPreviewTime(animTimeRef.current);
+    const target = promoteToCluster(base);
     const rest = s.previewRest!.get(anchor);
     if (!rest) return;
     s.recordHistory();
@@ -11650,10 +11685,12 @@ export default function Home() {
   const addKeyAtTime = captureKey;
   const spinTarget = (axis: "x" | "y" | "z", turns: number) => {
     const s = appRef.current,
-      target = animationTarget();
-    if (!s || !target) return;
+      base = animationTarget();
+    if (!s || !base) return;
     s.recordHistory();
-    const track = ensureTrack(target),
+    if (!s.previewRest) s.setPreviewTime(animTimeRef.current);
+    const target = promoteToCluster(base),
+      track = ensureTrack(target),
       vector: [number, number, number] = [axis === "x" ? 1 : 0, axis === "y" ? 1 : 0, axis === "z" ? 1 : 0];
     track.keys = spinKeys(vector, turns, s.animation.duration);
     setSelectedKey({ trackId: track.id, index: 1 });
