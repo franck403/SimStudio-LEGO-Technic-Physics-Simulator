@@ -11778,6 +11778,33 @@ export default function Home() {
     touchAnimation();
     if (previewActive) seekAnimation(animTimeRef.current);
   };
+  // Moving the pivot must not change the keyed poses, only how the group gets
+  // there: each key's offset is re-expressed so it rotates about the new pivot.
+  const movePivot = (
+    group: { id: string; pivot: [number, number, number] },
+    next: [number, number, number],
+  ) => {
+    const s = appRef.current,
+      delta = new THREE.Vector3(
+        next[0] - group.pivot[0],
+        next[1] - group.pivot[1],
+        next[2] - group.pivot[2],
+      );
+    s?.animation.tracks.forEach((track) => {
+      if (track.target.kind !== "group" || track.target.id !== group.id) return;
+      track.keys.forEach((key) => {
+        const angle = Math.hypot(key.r[0], key.r[1], key.r[2]);
+        if (angle < 1e-9) return;
+        const q = new THREE.Quaternion().setFromAxisAngle(
+            new THREE.Vector3(key.r[0] / angle, key.r[1] / angle, key.r[2] / angle),
+            THREE.MathUtils.degToRad(angle),
+          ),
+          shift = delta.clone().applyQuaternion(q).sub(delta);
+        key.p = [key.p[0] + shift.x, key.p[1] + shift.y, key.p[2] + shift.z];
+      });
+    });
+    group.pivot = next;
+  };
   const editGroup = (change: (group: NonNullable<ReturnType<typeof selectionGroup>>) => void) => {
     const group = selectionGroup();
     if (!group) return;
@@ -14072,11 +14099,11 @@ export default function Home() {
           onEaseKeyAt={easeKeyAt}
           onRemoveTrack={removeTrack}
           onRenameGroup={(name) => editGroup((group) => (group.name = name.slice(0, 40)))}
-          onPivot={(pivot) => editGroup((group) => (group.pivot = pivot))}
+          onPivot={(pivot) => editGroup((group) => movePivot(group, pivot))}
           onPivotFromPart={(partId) =>
             editGroup((group) => {
               const piece = appRef.current?.pieces.find((p) => p.id === partId);
-              if (piece) group.pivot = restPosition(piece).toArray() as [number, number, number];
+              if (piece) movePivot(group, restPosition(piece).toArray() as [number, number, number]);
             })
           }
           onPivotFromBounds={() =>
@@ -14085,7 +14112,7 @@ export default function Home() {
                 box = new THREE.Box3();
               members.forEach((p) => box.expandByPoint(restPosition(p)));
               if (!box.isEmpty())
-                group.pivot = box.getCenter(new THREE.Vector3()).toArray() as [number, number, number];
+                movePivot(group, box.getCenter(new THREE.Vector3()).toArray() as [number, number, number]);
             })
           }
           onClose={() => {
