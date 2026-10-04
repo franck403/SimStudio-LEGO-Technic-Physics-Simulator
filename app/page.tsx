@@ -231,9 +231,12 @@ type MapUpdateCandidate = {
 
 const DEFAULT_FOG_SETTINGS: FogSettings = {
   enabled: true,
-  near: 30,
-  far: 100,
+  near: 60,
+  far: 260,
 };
+// Largest fog / view distance (studs) and how far the camera can zoom out.
+const MAX_VIEW_DISTANCE = 1000;
+const MAX_ZOOM_DISTANCE = 400;
 
 // --- Catalog sources and packaged metadata ---------------------------------
 // The older pybricks mirror does not contain newer official parts such as
@@ -1254,7 +1257,7 @@ export default function Home() {
   // Project identity and revision bookkeeping are kept outside React state so
   // recovery saves can read the latest values without recreating callbacks.
   const activeProjectIdRef = useRef(createProjectId());
-  const projectNameRef = useRef("Untitled mechanism");
+  const projectNameRef = useRef("Untitled animation");
   const projectCreatedAtRef = useRef(new Date().toISOString());
   const projectRevisionRef = useRef(0);
   const savedProjectRevisionRef = useRef<number | null>(null);
@@ -1321,6 +1324,24 @@ export default function Home() {
   } | null>(null);
   const busyRef = useRef(false);
   const [videoOpen, setVideoOpen] = useState(false);
+  // "Precision less": moves / turns below these limits are treated as zero when a
+  // key is recorded, so a stray 0.025 stud drift cannot hide a pure rotation.
+  const [animPrecision, setAnimPrecisionState] = useState<{ move: number; turn: number }>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("brickreel:key-precision") ?? "null");
+      if (saved && Number.isFinite(saved.move) && Number.isFinite(saved.turn))
+        return { move: Math.max(0, saved.move), turn: Math.max(0, saved.turn) };
+    } catch {}
+    return { move: 0.05, turn: 0.5 };
+  });
+  const animPrecisionRef = useRef(animPrecision);
+  const setAnimPrecision = (next: { move: number; turn: number }) => {
+    animPrecisionRef.current = next;
+    setAnimPrecisionState(next);
+    try {
+      localStorage.setItem("brickreel:key-precision", JSON.stringify(next));
+    } catch {}
+  };
   const [videoOptions, setVideoOptions] = useState({
     format: "mp4" as "mp4" | "gif",
     width: 1280,
@@ -1419,7 +1440,7 @@ export default function Home() {
   });
 
   // Project manager and recovery-save state.
-  const [projectName, setProjectName] = useState("Untitled mechanism");
+  const [projectName, setProjectName] = useState("Untitled animation");
   const [projectNameEditing, setProjectNameEditing] = useState(false);
   const [projectNameDraft, setProjectNameDraft] = useState("");
   const [duplicateProjectDocument, setDuplicateProjectDocument] =
@@ -1761,12 +1782,12 @@ export default function Home() {
         const near = THREE.MathUtils.clamp(
             Number(savedFog.near) || DEFAULT_FOG_SETTINGS.near,
             1,
-            149,
+            MAX_VIEW_DISTANCE - 1,
           ),
           far = THREE.MathUtils.clamp(
             Number(savedFog.far) || DEFAULT_FOG_SETTINGS.far,
             near + 1,
-            160,
+            MAX_VIEW_DISTANCE,
           );
         setFogSettings({
           enabled: savedFog.enabled !== false,
@@ -1861,7 +1882,7 @@ export default function Home() {
   }, [fogSettings, theme]);
 
   useEffect(() => {
-    projectNameRef.current = projectName.trim() || "Untitled mechanism";
+    projectNameRef.current = projectName.trim() || "Untitled animation";
     const markDirty = !suppressProjectNameDirtyRef.current;
     suppressProjectNameDirtyRef.current = false;
     appRef.current?.scheduleRecoverySave(false, markDirty);
@@ -1962,7 +1983,7 @@ export default function Home() {
         43,
         host.clientWidth / host.clientHeight,
         0.1,
-        160,
+        MAX_VIEW_DISTANCE * 4,
       ),
       defaultCameraPosition = new THREE.Vector3(13, 12, 17),
       defaultCameraTarget = new THREE.Vector3(0, 2, 0),
@@ -3025,7 +3046,7 @@ export default function Home() {
       debugRoot = new THREE.Group();
     applyGizmoAppearance(gizmoScaleRef.current, gizmoThicknessRef.current);
     let showRotationPivot = false;
-    debugRoot.name = "Sim Studio diagnostics";
+    debugRoot.name = "BrickReel diagnostics";
     scene.add(debugRoot);
     const disposeDebug = () => {
       while (debugRoot.children.length) {
@@ -3714,7 +3735,7 @@ export default function Home() {
       disposeRenderBatches();
       if (!batchPieces.length) return;
       const root = new THREE.Group();
-      root.name = "Sim Studio instanced LDraw batches";
+      root.name = "BrickReel instanced LDraw batches";
       state.renderBatchRoot = root;
       state.renderBatchItems = [];
       state.renderLineBatchItems = [];
@@ -9171,13 +9192,29 @@ export default function Home() {
         nextDistance = THREE.MathUtils.clamp(
           offset.length() * (e.deltaY > 0 ? 1.08 : 0.92),
           0.5,
-          120,
+          MAX_ZOOM_DISTANCE,
         );
       camera.position.copy(cameraTarget.clone().add(offset.setLength(nextDistance)));
       camera.lookAt(cameraTarget);
     };
 
+    // While a video is rendered the canvas is drawn at exactly the output size
+    // (no adaptive scaling, no device pixel ratio) so frames are never upscaled.
+    let exportSize: { w: number; h: number } | null = null;
+    state.setExportSize = (size) => {
+      exportSize = size;
+      resize();
+    };
     const resize = () => {
+      if (exportSize) {
+        camera.aspect = exportSize.w / exportSize.h;
+        camera.updateProjectionMatrix();
+        renderer.setPixelRatio(1);
+        renderer.setSize(exportSize.w, exportSize.h, false);
+        gpuSceneRenderer?.resize(exportSize.w, exportSize.h, 1);
+        state.requestRender();
+        return;
+      }
       camera.aspect = host.clientWidth / host.clientHeight;
       camera.updateProjectionMatrix();
       state.renderScale = renderScale;
@@ -9775,7 +9812,7 @@ export default function Home() {
           lowerFpsThreshold = webGpuQualityActive ? 30 : 15,
           upperFpsThreshold = webGpuQualityActive ? 30 : 30;
         let nextScale = renderScale;
-        if (!adaptiveRenderingEnabled) {
+        if (!adaptiveRenderingEnabled || exportSize) {
           nextScale = 1;
           healthyFpsWindows = 0;
           lowFpsWindows = 0;
@@ -10124,7 +10161,7 @@ export default function Home() {
           physicsLogMs = performance.now() - phaseStarted;
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
-          console.error("Sim Studio physics frame stopped safely:", error);
+          console.error("BrickReel physics frame stopped safely:", error);
           state.simLog?.events.push(`Error físico recuperado: ${detail}`);
           state.running = false;
           state.world.free();
@@ -11719,6 +11756,22 @@ export default function Home() {
   };
   // Records where the selected group/part is RIGHT NOW as a key at the current
   // time: move it with the gizmo, then press Add key.
+  const snapKeyPrecision = (key: Keyframe) => {
+    const { move, turn } = animPrecisionRef.current;
+    if (Math.hypot(key.p[0], key.p[1], key.p[2]) <= move) key.p = [0, 0, 0];
+    else key.p = key.p.map((v) => (Math.abs(v) <= move ? 0 : v)) as Keyframe["p"];
+    if (Math.hypot(key.r[0], key.r[1], key.r[2]) <= turn) key.r = [0, 0, 0];
+    return key;
+  };
+  /** Applies the precision limits to every key of the selected track. */
+  const cleanKeys = () => {
+    const s = appRef.current;
+    if (!s) return;
+    s.recordHistory();
+    s.animation.tracks.forEach((track) => track.keys.forEach((key) => snapKeyPrecision(key)));
+    touchAnimation();
+    if (previewActive) seekAnimation(animTimeRef.current);
+  };
   const captureKey = () => {
     const s = appRef.current,
       base = animationTarget(),
@@ -11749,6 +11802,7 @@ export default function Home() {
       r: toRotationVector(rotation),
       e: "easeInOut",
     };
+    snapKeyPrecision(key);
     upsertKey(track, key);
     setSelectedKey({ trackId: track.id, index: track.keys.findIndex((k) => Math.abs(k.t - time) < 1e-3) });
     setPosing(false);
@@ -12080,6 +12134,9 @@ export default function Home() {
       canvasBox = s.renderer.domElement.getBoundingClientRect();
     try {
       setAnimPlaying(false);
+      const outWidth = Math.max(2, Math.round(videoOptions.width / 2) * 2),
+        outHeight = Math.max(2, Math.round(outWidth / Math.max(0.2, canvasBox.width / Math.max(1, canvasBox.height)) / 2) * 2);
+      s.setExportSize?.({ w: outWidth, h: outHeight });
       const blob = await mod.encodeVideo({
         duration: s.animation.duration,
         options: videoOptions,
@@ -12112,6 +12169,7 @@ export default function Home() {
     } catch (error) {
       setMessage(`${t.exportFailed}: ${error instanceof Error ? error.message : error}`);
     } finally {
+      s.setExportSize?.(null);
       seekAnimation(resumeAt);
       busyRef.current = false;
       setBusy(null);
@@ -12131,7 +12189,7 @@ export default function Home() {
     });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([makeLDR(lines)]));
-    a.download = "sim-studio-model.ldr";
+    a.download = "brickreel-model.ldr";
     a.click();
   };
 
@@ -12164,7 +12222,7 @@ export default function Home() {
     setProjectBusy(true);
     const previousSavedRevision = savedProjectRevisionRef.current;
     try {
-      projectNameRef.current = projectName.trim() || "Untitled mechanism";
+      projectNameRef.current = projectName.trim() || "Untitled animation";
       savedProjectRevisionRef.current = projectRevisionRef.current;
       const document = state.createProjectDocument();
       await saveBrowserProject(document);
@@ -12346,7 +12404,7 @@ export default function Home() {
     reset();
     const id = createProjectId(),
       createdAt = new Date().toISOString(),
-      name = "Untitled mechanism";
+      name = "Untitled animation";
     activeProjectIdRef.current = id;
     projectCreatedAtRef.current = createdAt;
     projectRevisionRef.current = 0;
@@ -12378,7 +12436,7 @@ export default function Home() {
   const exportCurrentProject = () => {
     const state = appRef.current;
     if (!state || running) return;
-    projectNameRef.current = projectName.trim() || "Untitled mechanism";
+    projectNameRef.current = projectName.trim() || "Untitled animation";
     downloadProjectDocument(state.createProjectDocument());
   };
 
@@ -14013,7 +14071,7 @@ export default function Home() {
         <div className="brand">
           <span className="mark">S</span>
           <div>
-            <strong>SIM STUDIO</strong>
+            <strong>BRICKREEL</strong>
             <small>{t.subtitle}</small>
           </div>
         </div>
@@ -14243,7 +14301,7 @@ export default function Home() {
               <div className="settings-row">
                 <span>{t.videoWidth}</span>
                 <div className="settings-choice">
-                  {(videoOptions.format === "gif" ? [320, 480, 640, 800] : [640, 1280, 1920]).map((width) => (
+                  {(videoOptions.format === "gif" ? [320, 480, 640, 800] : [1280, 1920, 2560, 3840]).map((width) => (
                     <button
                       key={width}
                       type="button"
@@ -14369,6 +14427,9 @@ export default function Home() {
             setAnimPlaying(false);
             appRef.current?.endPreview();
           }}
+          precision={animPrecision}
+          onPrecision={setAnimPrecision}
+          onCleanKeys={cleanKeys}
           onAddKey={addKeyAtTime}
           onSpin={spinTarget}
           onBeginPose={beginPose}
@@ -14494,7 +14555,7 @@ export default function Home() {
           <section className="project-dialog settings-dialog" role="dialog" aria-modal="true">
             <div className="project-dialog-head">
               <div>
-                <small>SIM STUDIO</small>
+                <small>BRICKREEL</small>
                 <h2>{t.fixer}</h2>
               </div>
               <button className="project-close" onClick={() => setFixerOpen(false)} aria-label={t.close}>
@@ -14569,7 +14630,7 @@ export default function Home() {
           >
             <div className="project-dialog-head">
               <div>
-                <small>SIM STUDIO · {t.settingsSubtitle.toUpperCase()}</small>
+                <small>BRICKREEL · {t.settingsSubtitle.toUpperCase()}</small>
                 <h2 id="settings-title">{t.settings}</h2>
               </div>
               <button
@@ -14718,7 +14779,7 @@ export default function Home() {
           >
             <div className="project-dialog-head">
               <div>
-                <small>SIM STUDIO · CACHE</small>
+                <small>BRICKREEL · CACHE</small>
                 <h2 id="map-updates-title">{t.mapUpdates}</h2>
               </div>
               <button
@@ -14838,7 +14899,7 @@ export default function Home() {
           >
             <div className="project-dialog-head">
               <div>
-                <small>SIM STUDIO {PROJECT_EXTENSION}</small>
+                <small>BRICKREEL {PROJECT_EXTENSION}</small>
                 <h2 id="projects-title">{t.projects}</h2>
               </div>
               <button
@@ -17139,7 +17200,7 @@ export default function Home() {
                   <input
                     type="range"
                     min="1"
-                    max="149"
+                    max={MAX_VIEW_DISTANCE - 1}
                     step="1"
                     value={fogSettings.near}
                     onChange={(event) =>
@@ -17158,7 +17219,7 @@ export default function Home() {
                   <input
                     type="range"
                     min="2"
-                    max="160"
+                    max={MAX_VIEW_DISTANCE}
                     step="1"
                     value={fogSettings.far}
                     onChange={(event) =>

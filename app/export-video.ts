@@ -68,13 +68,18 @@ export async function encodeVideo(job: VideoJob): Promise<Blob | null> {
   });
   const pixels = width * height;
   let configured = false;
-  for (const codec of ["avc1.640034", "avc1.64002A", "avc1.4d0028", "avc1.42001f"]) {
+  // ~0.3 bit per pixel per frame keeps fine edges and gradients clean (the old
+  // 0.14 showed blocky noise); 4K gets up to 100 Mbps.
+  const bitrate = Math.round(Math.min(100e6, Math.max(4e6, pixels * options.fps * 0.3)));
+  for (const codec of ["avc1.640034", "avc1.640033", "avc1.64002A", "avc1.4d0028", "avc1.42001f"]) {
     const config = {
       codec,
       width,
       height,
-      bitrate: Math.round(Math.min(40e6, Math.max(2e6, pixels * options.fps * 0.14))),
+      bitrate,
       framerate: options.fps,
+      latencyMode: "quality" as const,
+      bitrateMode: "variable" as const,
     };
     if ((await VideoEncoder.isConfigSupported(config)).supported) {
       encoder.configure(config);
@@ -94,7 +99,7 @@ export async function encodeVideo(job: VideoJob): Promise<Blob | null> {
       timestamp: Math.round((i * 1e6) / options.fps),
       duration: Math.round(1e6 / options.fps),
     });
-    encoder.encode(frame, { keyFrame: i % (options.fps * 2) === 0 });
+    encoder.encode(frame, { keyFrame: i % options.fps === 0 });
     frame.close();
     while (encoder.encodeQueueSize > 6) await new Promise((resolve) => setTimeout(resolve, 2));
     job.onProgress((i + 1) / total);

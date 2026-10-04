@@ -42,6 +42,9 @@ type Props = {
   onDuration: (seconds: number) => void;
   onLoop: (loop: boolean) => void;
   onEditPose: () => void;
+  precision: { move: number; turn: number };
+  onPrecision: (precision: { move: number; turn: number }) => void;
+  onCleanKeys: () => void;
   onAddKey: () => void;
   onSpin: (axis: "x" | "y" | "z", turns: number) => void;
   onBeginPose: () => void;
@@ -180,6 +183,34 @@ export default function TimelinePanel(props: Props) {
           />
           {L.loop}
         </label>
+        <label className="timeline-mini" title={L.precisionHelp}>
+          {L.precision}
+          <input
+            type="number"
+            min={0}
+            max={1}
+            step={0.01}
+            value={props.precision.move}
+            onChange={(event) =>
+              props.onPrecision({ ...props.precision, move: Math.max(0, Number(event.target.value) || 0) })
+            }
+          />
+          u
+          <input
+            type="number"
+            min={0}
+            max={10}
+            step={0.1}
+            value={props.precision.turn}
+            onChange={(event) =>
+              props.onPrecision({ ...props.precision, turn: Math.max(0, Number(event.target.value) || 0) })
+            }
+          />
+          °
+        </label>
+        <button type="button" onClick={props.onCleanKeys} title={L.precisionHelp}>
+          ✦ {L.cleanKeys}
+        </button>
         <select
           className="timeline-speed"
           value={props.speed}

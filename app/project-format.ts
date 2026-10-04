@@ -615,7 +615,7 @@ const sanitizeProjectDocument = (
     name:
       typeof document.name === "string" && document.name.trim()
         ? document.name.slice(0, 100)
-        : "Untitled mechanism",
+        : "Untitled animation",
     createdAt: validDate(document.createdAt, now),
     updatedAt: validDate(document.updatedAt, now),
     appVersion: typeof document.appVersion === "string" ? document.appVersion : "0.4",
@@ -677,18 +677,18 @@ const sanitizeProjectDocument = (
 
 export function validateProjectDocument(value: unknown): SimStudioProjectDocument {
   if (!value || typeof value !== "object")
-    throw new Error("The file does not contain a Sim Studio project.");
+    throw new Error("The file does not contain a BrickReel project.");
   const document = value as Partial<SimStudioProjectDocument>;
   if (
     document.format &&
     typeof document.format === "string" &&
     !document.format.toLowerCase().includes("sim")
   )
-    throw new Error("This is not a recognized Sim Studio project file.");
+    throw new Error("This is not a recognized BrickReel project file.");
   if (document.version && typeof document.version === "number" && document.version < 1)
     throw new Error(`Unsupported project version: ${String(document.version)}.`);
   if (!Array.isArray(document.pieces))
-    throw new Error("The Sim Studio project is incomplete or damaged.");
+    throw new Error("The BrickReel project is incomplete or damaged.");
   return sanitizeProjectDocument(document);
 }
 
@@ -723,7 +723,7 @@ export function safeProjectFileName(name: string) {
     .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-")
     .replace(/[. ]+$/g, "")
     .slice(0, 100);
-  return `${base || "Sim Studio project"}${PROJECT_EXTENSION}`;
+  return `${base || "BrickReel project"}${PROJECT_EXTENSION}`;
 }
 
 export function projectSummary(document: SimStudioProjectDocument): ProjectSummary {

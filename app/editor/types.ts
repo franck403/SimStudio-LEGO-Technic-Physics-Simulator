@@ -426,6 +426,7 @@ export type AppState = {
   previewRest: Map<Piece, RestPose> | null;
   previewTime: number;
   /** One-shot hook called right after the next frame is drawn (video/GIF capture). */
+  setExportSize?: (size: { w: number; h: number } | null) => void;
   afterRender?: (canvas: HTMLCanvasElement) => void;
   setPreviewTime: (time: number) => void;
   /** Restores the rest pose; returns true if a preview was active. */

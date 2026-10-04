@@ -45,7 +45,7 @@ export type ExportResult = {
 };
 
 export const STUD_METERS = 0.008;
-const CLIP_NAME = "SimStudio";
+const CLIP_NAME = "BrickReel";
 
 type Prototype = {
   geometry: THREE.BufferGeometry;
@@ -233,10 +233,10 @@ export type ExportInput = {
 export function buildExportScene(input: ExportInput, options: ExportOptions) {
   materialCache.clear();
   const root = new THREE.Group();
-  root.name = "SimStudioModel";
+  root.name = "BrickReelModel";
   const unitScale = options.units === "meters" ? STUD_METERS : 1;
   root.scale.setScalar(unitScale);
-  const used = new Set<string>(["SimStudioModel"]);
+  const used = new Set<string>(["BrickReelModel"]);
   const unique = (base: string) => {
     let name = base,
       n = 2;
@@ -328,7 +328,7 @@ export function buildExportScene(input: ExportInput, options: ExportOptions) {
   }
   root.userData = {
     simStudio: {
-      generator: "Sim Studio",
+      generator: "BrickReel",
       units: options.units,
       unitMeters: unitScale,
       studUnit: 1,
@@ -407,7 +407,7 @@ mixer.clipAction(clip).play();
 export function exampleViewerHtml(file: string, hasAnimation: boolean) {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sim Studio model</title>
+<title>BrickReel model</title>
 <style>html,body{margin:0;height:100%;background:#dfe7ed;overflow:hidden}</style>
 <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.185.1/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.185.1/examples/jsm/"}}</script>
 </head><body><script type="module">

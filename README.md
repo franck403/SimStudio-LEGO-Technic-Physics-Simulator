@@ -1,16 +1,16 @@
-# Sim Studio — LEGO® Builder & Animator
+# BrickReel — LEGO® Builder & Animator
 
-Sim Studio is a browser-based **LEGO® builder** with full **LDraw** support. Build Technic and System models from the complete LDraw parts library, snap them together with generated connection maps, group parts, animate them on a **timeline**, and export the result as a lightweight **GLB for Three.js**, an **MP4** or an animated **GIF**. Everything runs client-side — nothing to install.
+BrickReel is a browser-based **LEGO® builder** with full **LDraw** support. Build Technic and System models from the complete LDraw parts library, snap them together with generated connection maps, group parts, animate them on a **timeline**, and export the result as a lightweight **GLB for Three.js**, an **MP4** or an animated **GIF**. Everything runs client-side — nothing to install.
 
-> Sim Studio is an independent, unofficial project. It is not sponsored, endorsed or authorized by the LEGO Group, BrickLink or Studio.
+> BrickReel is an independent, unofficial project. It is not sponsored, endorsed or authorized by the LEGO Group, BrickLink or Studio.
 
 <p align="center">
-  <img src="docs/images/sim-studio-interface.png" alt="Sim Studio editor interface" width="800">
+  <img src="docs/images/sim-studio-interface.png" alt="BrickReel editor interface" width="800">
 </p>
 
 ## Use it online
 
-**[Open Sim Studio in your browser](https://franck403.github.io/SimStudio-LEGO-Technic-Physics-Simulator/)** — no download or installation is required.
+**[Open BrickReel in your browser](https://franck403.github.io/SimStudio-LEGO-Technic-Physics-Simulator/)** — no download or installation is required.
 
 ## Highlights
 
@@ -146,11 +146,11 @@ The renderer caps presentation at 60 FPS. Dynamic resolution reduction is reserv
 
 ## Projects and automatic recovery
 
-Click the project name in the top bar to open the project library. Named projects are stored locally in IndexedDB and remain available in that browser. The editor also maintains a separate invisible recovery document after edits, camera changes and settings changes; reopening or reloading Sim Studio restores that latest working state even when it was never added to the named project list.
+Click the project name in the top bar to open the project library. Named projects are stored locally in IndexedDB and remain available in that browser. The editor also maintains a separate invisible recovery document after edits, camera changes and settings changes; reopening or reloading BrickReel restores that latest working state even when it was never added to the named project list.
 
 The custom `.simstudio` format is compressed and self-contained. It stores part transforms and colors, embedded 3D assets (including external catalog parts), connection and collider maps, exact joint endpoints and modes, gear links, camera position, snap settings, structural behavior and global physics settings. Loading it reconstructs the saved connection graph directly instead of running proximity-based auto-connect again.
 
-Use **Export .simstudio** to keep a portable backup and **Import .simstudio** to add it to another browser. `Ctrl + S` updates an existing named project or opens the naming flow for a new one. The status dot is red while recovery is being written, yellow when the recoverable working copy is newer than the named project, and a green check when both match. Sim Studio confirms before discarding unsaved changes or deleting a browser project.
+Use **Export .simstudio** to keep a portable backup and **Import .simstudio** to add it to another browser. `Ctrl + S` updates an existing named project or opens the naming flow for a new one. The status dot is red while recovery is being written, yellow when the recoverable working copy is newer than the named project, and a green check when both match. BrickReel confirms before discarding unsaved changes or deleting a browser project.
 
 Saved project names are locked against accidental typing. Use the pencil button to rename the active project, or the duplicate button to create an independently named copy. Imported `.simstudio` files always become new browser projects; they receive a new internal ID and an automatic numeric suffix when their name is already in use, so an import never overwrites an existing project.
 
@@ -217,7 +217,7 @@ npm test                  # Build and automated tests
 
 - LDraw/MPD and Studio `.io` import restore part number, color, position and orientation.
 - `.io` export is not currently supported.
-- LDraw export creates `sim-studio-model.ldr`; Sim Studio-specific physics modes are not currently embedded in the exported model.
+- LDraw export creates `brickreel-model.ldr`; BrickReel-specific physics modes are not currently embedded in the exported model.
 - Named projects and automatic recovery are local to the current browser unless exported as `.simstudio` files.
 - Automatic connector detection is geometric and may require correction for unusual parts.
 - Compound colliders are simulation approximations, not manufacturing geometry.
@@ -230,7 +230,7 @@ npm test                  # Build and automated tests
 
 The original `.dat` sources under `public/ldraw/` retain their author, history and `!LICENSE` headers. Depending on the individual file, they are licensed under [CC BY 2.0](https://creativecommons.org/licenses/by/2.0/), [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), both licenses, or another license explicitly identified in that file.
 
-The pre-parsed Three.js geometry, generated connection data and generated collider descriptions are conversions/derivative data created from those LDraw sources by Sim Studio. They are distributed with attribution to **The LDraw Parts Library**, links to the applicable license terms, and an indication that conversion, scaling, coordinate transformation and physics approximation changes were made. Rendered 2D thumbnails are treated separately under the LDraw rendered-image policy.
+The pre-parsed Three.js geometry, generated connection data and generated collider descriptions are conversions/derivative data created from those LDraw sources by BrickReel. They are distributed with attribution to **The LDraw Parts Library**, links to the applicable license terms, and an indication that conversion, scaling, coordinate transformation and physics approximation changes were made. Rendered 2D thumbnails are treated separately under the LDraw rendered-image policy.
 
 See [LDRAW-NOTICE.md](./LDRAW-NOTICE.md) and `public/ldraw/CAreadme.txt` for the redistribution notice. The project does not add technological or legal restrictions to the packaged LDraw material beyond the terms identified by its source files.
 
