@@ -9,6 +9,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import * as THREE from "three";
+import { STLLoader } from "three/addons/loaders/STLLoader.js";
 import { LDrawLoader, clearLDrawCaches } from "./vendor/LDrawLoader.js";
 import { LDrawConditionalLineMaterial } from "three/addons/materials/LDrawConditionalLineMaterial.js";
 import { ldrawToScenePlacement, makeLDR, parseLDR, type LDrawPlacement } from "./ldraw";
@@ -1302,6 +1303,7 @@ export default function Home() {
   const [mapUpdates, setMapUpdates] = useState<MapUpdateCandidate[]>([]);
   const [mapUpdatesOpen, setMapUpdatesOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [timelineOpen, setTimelineOpen] = useState(false);
   const [animRev, setAnimRev] = useState(0);
   const [animTime, setAnimTime] = useState(0);
@@ -12174,7 +12176,71 @@ export default function Home() {
     }
   };
 
+  // STL meshes become ordinary pieces: millimetres -> studs (8 mm), Z-up -> Y-up,
+  // centred, with the triangle data stored inside the project like any part.
+  const importStl = async (files: File[]) => {
+    const s = appRef.current;
+    if (!s || running) return;
+    setMessage(t.stlLoading);
+    s.recordHistory();
+    let added = 0;
+    const target = s.cameraTarget;
+    for (const file of files) {
+      try {
+        const geometry = new STLLoader().parse(await file.arrayBuffer());
+        geometry.rotateX(-Math.PI / 2);
+        geometry.scale(1 / 8, 1 / 8, 1 / 8);
+        geometry.computeBoundingBox();
+        const box = geometry.boundingBox!,
+          centre = box.getCenter(new THREE.Vector3());
+        geometry.translate(-centre.x, -box.min.y, -centre.z);
+        if (!geometry.getAttribute("normal")) geometry.computeVertexNormals();
+        const mesh = new THREE.Mesh(
+            geometry,
+            new THREE.MeshStandardMaterial({ color: 0x9ba0a8, roughness: 0.6, flatShading: true }),
+          ),
+          model = new THREE.Group();
+        model.add(mesh);
+        const base = file.name.replace(/\.stl$/i, "").replace(/[^\w.-]+/g, "_"),
+          part = `stl-${base}`,
+          piece = await s.addPart(
+            {
+              part,
+              name: base,
+              kind: kindFor("", ""),
+              color: 71,
+              origin: "catalog-search",
+              sourceKind: "packaged-cache",
+              embeddedGeometry: model.toJSON() as unknown as JsonObject,
+              projectAssetKey: part,
+            },
+            new THREE.Vector3(Math.round(target.x) + added * 2, 0, Math.round(target.z)),
+          );
+        if (piece) {
+          added++;
+          s.selected = piece;
+          s.selectedPieces = new Set([piece]);
+          setSelectedId(piece.id);
+        }
+      } catch (error) {
+        setMessage(`${t.stlFailed}: ${file.name} · ${error instanceof Error ? error.message : error}`);
+      }
+    }
+    if (added) {
+      setCount(s.pieces.length);
+      setMessage(`${t.stlLoaded}: ${added}`);
+      s.rebuildRenderBatches();
+      s.refreshDebug();
+      s.requestRender();
+      s.scheduleRecoverySave();
+    }
+  };
+
   const handleImportFile = async (file: File) => {
+    if (/\.stl$/i.test(file.name)) {
+      await importStl([file]);
+      return;
+    }
     const fileName = file.name.toLowerCase();
     if (fileName.endsWith(".simstudio")) {
       await importProjectFile(file);
@@ -13698,15 +13764,6 @@ export default function Home() {
           </div>
         </div>
         <button
-          className="theme-toggle"
-          onClick={() => setTheme((value) => (value === "dark" ? "light" : "dark"))}
-          aria-label={t.switchTheme}
-          title={theme === "dark" ? t.light : t.dark}
-        >
-          <span>{theme === "dark" ? "☀" : "◐"}</span>
-          {theme === "dark" ? t.light : t.dark}
-        </button>
-        <button
           className="project project-button"
           onClick={() => setProjectMenuOpen(true)}
           title={t.manageProjects}
@@ -13726,52 +13783,15 @@ export default function Home() {
             ref={fileRef}
             type="file"
             hidden
-            accept=".simstudio,.ldr,.mpd,.io,.json"
+            multiple
+            accept=".simstudio,.ldr,.mpd,.io,.json,.stl"
             onChange={(e) => {
-              const file = e.target.files?.[0];
+              const files = [...(e.target.files ?? [])];
               e.currentTarget.value = "";
-              if (file) void handleImportFile(file);
+              if (files.length && files.every((f) => /\.stl$/i.test(f.name))) void importStl(files);
+              else if (files[0]) void handleImportFile(files[0]);
             }}
           />
-          <button
-            className="ghost project-manager-trigger"
-            onClick={() => setProjectMenuOpen(true)}
-            title={`${t.manageProjects} · Ctrl+S`}
-          >
-            ▣ {t.projectsButton}
-          </button>
-          <button
-            className={`ghost map-update-trigger ${mapUpdates.length ? "pending" : ""}`}
-            onClick={() => setMapUpdatesOpen(true)}
-            title={t.mapUpdates}
-          >
-            ↻ {t.mapUpdatesButton}
-            <b>{mapUpdates.length}</b>
-          </button>
-          <button
-            className="ghost settings-trigger"
-            onClick={() => setSettingsOpen(true)}
-            title="Settings · Graphics & System"
-            aria-label="Settings"
-            style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "8px 10px" }}
-          >
-            <svg
-              width="15"
-              height="15"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
-              style={{ flexShrink: 0 }}
-            >
-              <circle cx="12" cy="12" r="3" />
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-            </svg>
-            <span>Settings</span>
-          </button>
           <input
             ref={projectFileRef}
             type="file"
@@ -13805,47 +13825,11 @@ export default function Home() {
           </button>
           <button
             className="ghost"
-            style={{ minWidth: 34, padding: "10px 8px", fontSize: 16, lineHeight: 1 }}
-            disabled={running || !selected}
-            onClick={() => appRef.current?.copySelected()}
-            aria-label="Copy part"
-            title="Copy part · Ctrl+C"
-          >
-            ⧉
-          </button>
-          <button
-            className="ghost"
-            style={{ minWidth: 34, padding: "10px 8px", fontSize: 16, lineHeight: 1 }}
             disabled={running}
-            onClick={() => void appRef.current?.pasteClipboard()}
-            aria-label="Paste part"
-            title="Paste part · Ctrl+V"
+            onClick={selected?.groupId ? ungroupSelected : groupSelected}
+            title={t.groupHelp}
           >
-            ⎘
-          </button>
-          <button className="ghost" onClick={() => fileRef.current?.click()}>
-            {t.import}
-          </button>
-          <button className="ghost" onClick={exportModel}>
-            {t.export}
-          </button>
-          <button className="ghost" disabled={running} onClick={groupSelected} title={t.groupHelp}>
-            ⛓ {t.group}
-          </button>
-          <button className="ghost" disabled={running} onClick={ungroupSelected}>
-            {t.ungroup}
-          </button>
-          <button className="ghost" disabled={running} onClick={() => setFixerOpen(true)}>
-            🛠 {t.fixer}
-          </button>
-          <button
-            className="ghost"
-            onClick={() => {
-              setExportInfo(null);
-              setExportOpen(true);
-            }}
-          >
-            ⬇ GLB
+            {selected?.groupId ? `⛓ ${t.ungroup}` : `⛓ ${t.group}`}
           </button>
           <button
             className={timelineOpen ? "play" : "ghost"}
@@ -13870,6 +13854,92 @@ export default function Home() {
               {physicsBusy ? "…" : running ? t.stop : t.simulate}
             </button>
           )}
+          <button
+            className="ghost settings-trigger"
+            onClick={() => setSettingsOpen(true)}
+            title="Settings · Graphics & System"
+            aria-label="Settings"
+            style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "10px 10px" }}
+          >
+            <svg
+              width="15"
+              height="15"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+              style={{ flexShrink: 0 }}
+            >
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          </button>
+          <div className="header-menu-wrap">
+            <button
+              className="menu-trigger"
+              onClick={() => setMenuOpen((open) => !open)}
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+            >
+              ⋯ {t.more}
+              {mapUpdates.length > 0 && <b>{mapUpdates.length}</b>}
+            </button>
+            {menuOpen && (
+              <>
+                <div className="header-menu-backdrop" onClick={() => setMenuOpen(false)} />
+                <div className="header-menu" role="menu">
+                  {(
+                    [
+                      [`▣ ${t.projectsButton}`, () => setProjectMenuOpen(true), false],
+                      [t.import, () => fileRef.current?.click(), false],
+                      [`${t.export} (LDraw)`, exportModel, false],
+                      [
+                        "⬇ GLB · Three.js",
+                        () => {
+                          setExportInfo(null);
+                          setExportOpen(true);
+                        },
+                        false,
+                      ],
+                      ["—", null, false],
+                      [`🛠 ${t.fixer}`, () => setFixerOpen(true), running],
+                      [`⧉ ${t.copy}`, () => appRef.current?.copySelected(), running || !selected],
+                      [`⎘ ${t.paste}`, () => void appRef.current?.pasteClipboard(), running],
+                      [
+                        `↻ ${t.mapUpdatesButton}${mapUpdates.length ? ` (${mapUpdates.length})` : ""}`,
+                        () => setMapUpdatesOpen(true),
+                        false,
+                      ],
+                      [
+                        theme === "dark" ? `☀ ${t.light}` : `◐ ${t.dark}`,
+                        () => setTheme((value) => (value === "dark" ? "light" : "dark")),
+                        false,
+                      ],
+                    ] as [string, (() => void) | null, boolean][]
+                  ).map(([label, action, disabled], index) =>
+                    action ? (
+                      <button
+                        key={index}
+                        role="menuitem"
+                        disabled={disabled}
+                        onClick={() => {
+                          setMenuOpen(false);
+                          action();
+                        }}
+                      >
+                        {label}
+                      </button>
+                    ) : (
+                      <hr key={index} />
+                    ),
+                  )}
+                </div>
+              </>
+            )}
+          </div>
         </div>
       </header>
       {timelineOpen && (

@@ -106,6 +106,12 @@ const enTranslations = {
   replaceRun: "Replace and re-snap",
   replaceNone: "No matching parts",
   replaced: "Replaced",
+  more: "More",
+  copy: "Copy",
+  paste: "Paste",
+  stlLoading: "Loading STL…",
+  stlLoaded: "STL parts added",
+  stlFailed: "STL import failed",
   forceReloadNone: "Select a part first",
   mapUpdatesHelp:
     "These parts have saved maps that differ from the packaged maps. New packaged changes open this menu automatically.",
