@@ -14,6 +14,37 @@ import { LDrawConditionalLineMaterial } from "three/addons/materials/LDrawCondit
 import { ldrawToScenePlacement, makeLDR, parseLDR, type LDrawPlacement } from "./ldraw";
 import { flattenLDrawRenderables } from "./ldraw-geometry";
 import { createLDrawWorkerPool, WorkerUnavailable } from "./ldraw-worker-client";
+import {
+  cloneAnimation,
+  cloneGroups,
+  emptyAnimation,
+  findTrack,
+  keyAt,
+  newTrackId,
+  sanitizeAnimation,
+  sanitizeGroups,
+  spinKeys,
+  upsertKey,
+  type Keyframe,
+  type Track,
+  type TrackTarget,
+} from "./animation.ts";
+import {
+  applyPose,
+  captureRest,
+  createGroup,
+  pruneGroupsAndTracks,
+  restoreRest,
+  ungroupPiece,
+} from "./animation-runtime";
+import {
+  applySeat,
+  distanceToLine,
+  motorSpinKeys,
+  seatingCorrection,
+  snapToLattice,
+} from "./model-fixer";
+import TimelinePanel, { type TimelineSelection } from "./components/TimelinePanel";
 import { mergeSubpartConnectors, subpartConnectors, type SubpartHit } from "./ldraw-subparts";
 import { extractStudioLDraw } from "./studio-io";
 import {
@@ -164,6 +195,7 @@ import type {
   ConnectionProfile,
   DebugFlags,
   EditorSnapshot,
+  FixReport,
   FramePerformanceSample,
   GridStep,
   ImportDraft,
@@ -1270,6 +1302,47 @@ export default function Home() {
   const [mapUpdates, setMapUpdates] = useState<MapUpdateCandidate[]>([]);
   const [mapUpdatesOpen, setMapUpdatesOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [timelineOpen, setTimelineOpen] = useState(false);
+  const [animRev, setAnimRev] = useState(0);
+  const [animTime, setAnimTime] = useState(0);
+  const [animPlaying, setAnimPlaying] = useState(false);
+  const [animSpeed, setAnimSpeed] = useState(1);
+  const [previewActive, setPreviewActive] = useState(false);
+  const [posing, setPosing] = useState(false);
+  const [selectedKey, setSelectedKey] = useState<TimelineSelection>(null);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportBusy, setExportBusy] = useState(false);
+  const [exportOptions, setExportOptions] = useState({
+    units: "meters" as "meters" | "studs",
+    animation: true,
+    outlines: false,
+  });
+  const [exportInfo, setExportInfo] = useState<{
+    file: string;
+    stats: { parts: number; groups: number; uniqueMeshes: number; triangles: number; tracks: number; bytes: number };
+    snippet: string;
+    viewer: string;
+  } | null>(null);
+  const [fixerOpen, setFixerOpen] = useState(false);
+  const [fixerBusy, setFixerBusy] = useState(false);
+  const [fixerOptions, setFixerOptions] = useState({ rebuild: true, realign: true, motors: true });
+  const [fixerReport, setFixerReport] = useState<FixReport | null>(null);
+  const [replaceFrom, setReplaceFrom] = useState("");
+  const [replaceTo, setReplaceTo] = useState("");
+  const [legacyPhysics, setLegacyPhysics] = useState(() => {
+    try {
+      return localStorage.getItem("sim-studio:legacy-physics") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const animTimeRef = useRef(0);
+  const previewEndedRef = useRef<(() => void) | undefined>(undefined);
+  previewEndedRef.current = () => {
+    setPreviewActive(false);
+    setAnimPlaying(false);
+    setPosing(false);
+  };
 
   // Placement, snapping and pending import controls.
   const [rotationAngle, setRotationAngle] = useState(15);
@@ -4308,6 +4381,10 @@ export default function Home() {
       axleSnapStep,
       rotationSnapStep,
       pieces: [],
+      groups: [],
+      animation: emptyAnimation(),
+      previewRest: null,
+      previewTime: 0,
       selectedPieces: new Set<Piece>(),
       connections: [],
       gearLinks: [],
@@ -5119,6 +5196,328 @@ export default function Home() {
     };
     state.verifyConnections = verifyConnections;
     state.verifyConnectionsAsync = verifyConnectionsAsync;
+
+    // --- Animation preview, part replacement and the model fixer ------------
+    const setPreviewTime = (time: number) => {
+      if (!state.previewRest) state.previewRest = captureRest(state.pieces);
+      state.previewTime = time;
+      applyPose(state.pieces, state.previewRest, state.groups, state.animation, time);
+      state.renderBatchesDirty = true;
+      state.updateRenderBatches();
+      state.requestRender();
+    };
+    const endPreview = () => {
+      if (!state.previewRest) return false;
+      restoreRest(state.previewRest);
+      state.previewRest = null;
+      state.renderBatchesDirty = true;
+      state.updateRenderBatches();
+      state.requestRender();
+      previewEndedRef.current?.();
+      return true;
+    };
+    const runAtRest = async <T,>(task: () => Promise<T> | T): Promise<T> => {
+      const previewing = state.previewRest ? state.previewTime : null;
+      if (state.previewRest) restoreRest(state.previewRest);
+      try {
+        return await task();
+      } finally {
+        if (previewing !== null && state.previewRest)
+          applyPose(state.pieces, state.previewRest, state.groups, state.animation, previewing);
+      }
+    };
+
+    // Rebuilds parts from the real LDraw files with freshly generated
+    // connectors (saved projects carry the old, possibly broken ones), gives
+    // them a new id, optionally swaps the part number, and re-snaps.
+    const replacePieces = async (targets: Piece[], toCatalog?: CatalogPart) => {
+      endPreview();
+      clearLDrawCaches();
+      [primaryPool, legacyPool, mirrorPool, officialPool].forEach((pool) => pool.reset());
+      libraryStamps.clear();
+      modelCache.clear();
+      sourceModelCache.clear();
+      modelSourceCache.clear();
+      preloaded.clear();
+      preloading.clear();
+      const targetSet = new Set(targets),
+        idMap = new Map<string, string>(),
+        seenKeys = new Set<string>();
+      state.disposeRenderBatches();
+      state.connections = state.connections.filter(
+        (connection) => !targetSet.has(connection.a) && !targetSet.has(connection.b),
+      );
+      let count = 0;
+      for (const piece of targets) {
+        try {
+          const catalog: CatalogPart = toCatalog
+            ? {
+                ...toCatalog,
+                color: piece.color,
+                sourceColor: toCatalog.color,
+                embeddedGeometry: undefined,
+                projectAssetKey: undefined,
+              }
+            : {
+                ...piece,
+                embeddedGeometry: undefined,
+                geometry: undefined,
+                projectAssetKey: undefined,
+                sourceKind: "ldraw-network" as const,
+              };
+          const key = correctionStorageKeyFor(catalog);
+          if (!seenKeys.has(key)) {
+            seenKeys.add(key);
+            const provenance = readMapProvenance(localStorage, key);
+            if (provenance.connectors?.origin !== "manual") {
+              localStorage.removeItem(`sim-connectors-v4:${key}`);
+              connectorCache.delete(key);
+            }
+            if (provenance.colliders?.origin !== "manual") {
+              localStorage.removeItem(`sim-colliders-v1:${key}`);
+              collisionCache.delete(key);
+            }
+          }
+          const exact = await loadPartModel(catalog);
+          prepareModel(exact);
+          exact.traverse((object) => {
+            if (object instanceof THREE.Mesh) {
+              object.castShadow = true;
+              object.receiveShadow = true;
+            }
+          });
+          piece.mesh.clear();
+          piece.mesh.add(exact);
+          piece.mesh.updateMatrixWorld(true);
+          const analysis = analyzePart(piece.mesh, catalog),
+            oldId = String(piece.id);
+          Object.assign(piece, {
+            part: catalog.part,
+            name: catalog.name,
+            kind: catalog.kind,
+            modelPart: catalog.modelPart,
+            resolvedPart: catalog.resolvedPart,
+            sourceKind: catalog.sourceKind,
+            sourceColor: catalog.sourceColor,
+            downloadUrl: catalog.downloadUrl,
+            downloadSource: catalog.downloadSource,
+            thumb: catalog.thumb ?? piece.thumb,
+            embeddedGeometry: undefined,
+            geometry: toCatalog?.geometry,
+            projectAssetKey: undefined,
+            connectors: analysis.connectors,
+            colliders: analysis.colliders,
+            gearColliders: analysis.gearColliders,
+            specialGear: analysis.specialGear,
+            mapProvenance: analysis.mapProvenance,
+            gear: isGearPart(catalog),
+            pin: isPinPart(catalog),
+            frictionPin: hasPinFriction(catalog),
+            dynamicAxleConnections: isAxlePart(catalog) || isGearboxExtensionPart(catalog),
+            id: Date.now() + Math.random(),
+          });
+          piece.mesh.userData.connectorReach = connectorMapReach(piece.connectors);
+          idMap.set(oldId, String(piece.id));
+          count++;
+        } catch {
+          // A part that cannot be downloaded keeps its old mesh and connectors.
+        }
+      }
+      state.animation.tracks.forEach((track) => {
+        const next = track.target.kind === "piece" ? idMap.get(track.target.id) : undefined;
+        if (next) track.target.id = next;
+      });
+      state.rebuildRenderBatches();
+      await verifyConnectionsAsync();
+      state.gearLinks = detectGearLinks(
+        state.pieces,
+        undefined,
+        differentialCarrierGearExclusions(state.pieces, state.connections),
+      );
+      state.refreshDebug();
+      state.requestRender();
+      return { count };
+    };
+
+    const fixModel = async (options: {
+      rebuild: boolean;
+      realign: boolean;
+      motors: boolean;
+    }): Promise<FixReport> => {
+      const report: FixReport = {
+        rebuilt: 0,
+        rotationsSnapped: 0,
+        realigned: 0,
+        connections: 0,
+        motorsConverted: 0,
+        motorsSkipped: 0,
+        groupsPruned: 0,
+      };
+      endPreview();
+      if (options.rebuild) report.rebuilt = (await replacePieces([...state.pieces])).count;
+      const moved = new Set<Piece>();
+      if (options.realign) {
+        for (const piece of state.pieces) {
+          const snapped = snapToLattice(piece.mesh.quaternion, 2);
+          if (snapped) {
+            piece.mesh.quaternion.copy(snapped);
+            piece.mesh.updateMatrixWorld(true);
+            moved.add(piece);
+            report.rotationsSnapped++;
+          }
+        }
+        type Pair = {
+          a: Piece;
+          b: Piece;
+          socketPiece: Piece;
+          socket: MeshConnector;
+          shaftPiece: Piece;
+          shaft: MeshConnector;
+        };
+        const neighbours = new Map<Piece, Pair[]>(),
+          reach = (piece: Piece) =>
+            (piece.mesh.userData.connectorReach as number | undefined) ??
+            connectorMapReach(piece.connectors);
+        state.pieces.forEach((piece) => neighbours.set(piece, []));
+        for (let i = 0; i < state.pieces.length; i++) {
+          if (i % 40 === 39) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+          const first = state.pieces[i];
+          for (let j = i + 1; j < state.pieces.length; j++) {
+            const second = state.pieces[j];
+            if (
+              first.mesh.position.distanceTo(second.mesh.position) >
+              reach(first) + reach(second) + 0.8
+            )
+              continue;
+            for (const c1 of first.connectors)
+              for (const c2 of second.connectors) {
+                const [socketPiece, socket, shaftPiece, shaft] =
+                  c1.role === "socket" && c2.role === "shaft"
+                    ? [first, c1, second, c2]
+                    : c1.role === "shaft" && c2.role === "socket"
+                      ? [second, c2, first, c1]
+                      : [];
+                if (!socketPiece || !socket || !shaftPiece || !shaft) continue;
+                if (!connectorProfile(shaft, socket)) continue;
+                const sw = worldConnector(socketPiece, socket),
+                  hw = worldConnector(shaftPiece, shaft);
+                if (Math.abs(sw.axis.dot(hw.axis)) < 0.93) continue;
+                const delta = sw.point.clone().sub(hw.point),
+                  along = delta.dot(hw.axis),
+                  radial = delta.clone().addScaledVector(hw.axis, -along).length();
+                const axialOk =
+                  shaft.kind === "axle"
+                    ? Math.abs(along) <= (shaft.length ?? 0.5) / 2 + 0.4
+                    : Math.min(
+                        ...connectorAxialOffsets(shaft, socket).map((o) => Math.abs(along - o)),
+                      ) <= 0.4;
+                if (radial > 0.45 || !axialOk) continue;
+                const pair = { a: first, b: second, socketPiece, socket, shaftPiece, shaft };
+                neighbours.get(first)!.push(pair);
+                neighbours.get(second)!.push(pair);
+              }
+          }
+        }
+        const visited = new Set<Piece>(),
+          order = [...state.pieces].sort(
+            (x, y) =>
+              Number(y.fixed) - Number(x.fixed) ||
+              neighbours.get(y)!.length - neighbours.get(x)!.length,
+          );
+        for (const root of order) {
+          if (visited.has(root)) continue;
+          visited.add(root);
+          const queue = [root];
+          while (queue.length) {
+            const current = queue.shift()!;
+            for (const pair of neighbours.get(current)!) {
+              const other = pair.a === current ? pair.b : pair.a;
+              if (visited.has(other)) continue;
+              const members = editorAssemblyMembers(state.pieces, other).filter(
+                  (member) => !visited.has(member),
+                ),
+                moverIsShaft = pair.shaftPiece === other,
+                mover = moverIsShaft ? pair.shaft : pair.socket,
+                target = moverIsShaft ? pair.socket : pair.shaft,
+                targetPiece = moverIsShaft ? pair.socketPiece : pair.shaftPiece,
+                moverWorld = worldConnector(other, mover),
+                targetWorld = worldConnector(targetPiece, target),
+                seat = seatingCorrection(
+                  moverWorld.point,
+                  moverWorld.axis,
+                  targetWorld.point,
+                  targetWorld.axis,
+                  true,
+                ),
+                error = seat.translation.length() + seat.rotation.angleTo(new THREE.Quaternion());
+              if (error > 0.002)
+                for (const member of members.length ? members : [other]) {
+                  applySeat(member.mesh, seat, moverWorld.point);
+                  moved.add(member);
+                }
+              if (error > 0.002) report.realigned++;
+              (members.length ? members : [other]).forEach((member) => visited.add(member));
+              queue.push(other);
+            }
+          }
+        }
+        state.connections = state.connections.filter(
+          (connection) => !moved.has(connection.a) && !moved.has(connection.b),
+        );
+        state.rebuildRenderBatches();
+        await verifyConnectionsAsync();
+        report.connections = state.connections.length;
+      }
+      if (options.motors) {
+        const spin = (piece: Piece, point: THREE.Vector3, axis: THREE.Vector3, speed: number) => {
+          if (
+            findTrack(state.animation, { kind: "piece", id: String(piece.id) }) ||
+            distanceToLine(piece.mesh.position, point, axis) > 0.25
+          ) {
+            report.motorsSkipped++;
+            return;
+          }
+          state.animation.tracks.push({
+            id: newTrackId(),
+            target: { kind: "piece", id: String(piece.id) },
+            keys: motorSpinKeys(
+              [axis.x, axis.y, axis.z],
+              speed,
+              state.animation.duration,
+            ),
+          });
+          report.motorsConverted++;
+        };
+        for (const connection of state.connections)
+          if (connection.mode === "motor")
+            spin(
+              connection.b.fixed ? connection.a : connection.b,
+              connection.point,
+              connection.axis,
+              connection.motorSpeed,
+            );
+        for (const piece of state.pieces)
+          if (piece.gearMotor) {
+            const link = state.connections.find((c) => c.a === piece || c.b === piece);
+            if (link) spin(piece, link.point, link.axis, piece.gearMotor.speed);
+            else report.motorsSkipped++;
+          }
+      }
+      const before = state.groups.length;
+      pruneGroupsAndTracks(state.pieces, state.groups, state.animation);
+      report.groupsPruned = before - state.groups.length;
+      state.refreshDebug();
+      state.requestRender();
+      scheduleRecoverySave();
+      return report;
+    };
+    Object.assign(state, {
+      setPreviewTime,
+      endPreview,
+      runAtRest,
+      replacePieces,
+      fixModel,
+    });
     const verifyPieceConnections = (movedPiece: Piece, notify = true) => {
       const started = performance.now(),
         previousPartners = state.connections
@@ -6751,6 +7150,7 @@ export default function Home() {
         dynamicAxleConnections: piece.dynamicAxleConnections,
         editorAssemblyId: piece.editorAssemblyId,
         editorAssemblyDetached: piece.editorAssemblyDetached,
+        groupId: piece.groupId,
         editorCardanReferenceConnector: piece.editorCardanReferenceConnector,
         rotationPivotLocal: piece.rotationPivotLocal?.clone(),
         rotationPivotKey: piece.rotationPivotKey,
@@ -6772,6 +7172,8 @@ export default function Home() {
       })),
       selected: state.selected,
       selectedPieces: [...state.selectedPieces],
+      groups: cloneGroups(state.groups),
+      animation: cloneAnimation(state.animation),
     });
     const undoStack: EditorSnapshot[] = [],
       redoStack: EditorSnapshot[] = [];
@@ -6807,6 +7209,7 @@ export default function Home() {
         | undefined,
       pasteIndex = 0;
     const restoreEditorSnapshot = async (snapshot: EditorSnapshot) => {
+      state.endPreview();
       restoringHistory = true;
       try {
         state.disposeRenderBatches();
@@ -6831,6 +7234,7 @@ export default function Home() {
           piece.dynamicAxleConnections = item.dynamicAxleConnections;
           piece.editorAssemblyId = item.editorAssemblyId;
           piece.editorAssemblyDetached = item.editorAssemblyDetached;
+          piece.groupId = item.groupId;
           piece.editorCardanReferenceConnector = item.editorCardanReferenceConnector;
           piece.rotationPivotLocal = item.rotationPivotLocal?.clone();
           piece.rotationPivotKey = item.rotationPivotKey;
@@ -6847,6 +7251,8 @@ export default function Home() {
           } else if (!piece.fixed) disposeLock(piece);
         }
         state.connections = snapshot.connections.map(cloneConnection);
+        if (snapshot.groups) state.groups = cloneGroups(snapshot.groups);
+        if (snapshot.animation) state.animation = cloneAnimation(snapshot.animation);
         state.connectionModes = new Map(
           [...snapshot.connectionModes].map(([id, mode]) => [id, { ...mode }]),
         );
@@ -6994,7 +7400,7 @@ export default function Home() {
     let recoveryTimer = 0,
       recoveryGeneration = 0,
       restoringProject = false;
-    const createProjectDocument = (identity?: {
+    const createProjectDocumentAtRest = (identity?: {
       id?: string;
       name?: string;
       createdAt?: string;
@@ -7045,6 +7451,7 @@ export default function Home() {
             dynamicAxleConnections: piece.dynamicAxleConnections,
             editorAssemblyId: piece.editorAssemblyId,
             editorAssemblyDetached: piece.editorAssemblyDetached,
+            groupId: piece.groupId,
             editorCardanReferenceConnector: piece.editorCardanReferenceConnector,
             rotationPivotLocal: piece.rotationPivotLocal
               ? tuple3(piece.rotationPivotLocal)
@@ -7162,6 +7569,19 @@ export default function Home() {
         connections,
         gearLinks,
         rubberBands,
+        groups: cloneGroups(state.groups),
+        animation: (() => {
+          const doc = cloneAnimation(state.animation),
+            saved = new Map(state.pieces.map((piece) => [String(piece.id), pieceIds.get(piece)!]));
+          doc.tracks = doc.tracks.flatMap((track) =>
+            track.target.kind === "group"
+              ? [track]
+              : saved.has(track.target.id)
+                ? [{ ...track, target: { kind: "piece" as const, id: saved.get(track.target.id)! } }]
+                : [],
+          );
+          return doc;
+        })(),
         mapBaselines,
         importedCatalog,
         camera: {
@@ -7178,6 +7598,22 @@ export default function Home() {
           physics: { ...state.physicsSettings },
         },
       };
+    };
+
+    // Saved data always holds the rest pose, never a previewed animation frame.
+    const createProjectDocument = (identity?: {
+      id?: string;
+      name?: string;
+      createdAt?: string;
+    }) => {
+      const previewing = state.previewRest ? state.previewTime : null;
+      if (state.previewRest) restoreRest(state.previewRest);
+      try {
+        return createProjectDocumentAtRest(identity);
+      } finally {
+        if (previewing !== null && state.previewRest)
+          applyPose(state.pieces, state.previewRest, state.groups, state.animation, previewing);
+      }
     };
 
     const scheduleRecoverySave = (immediate = false, markDirty = true) => {
@@ -7208,6 +7644,7 @@ export default function Home() {
           return sources.length ? [{ ...candidate, sources }] : [];
         }),
       );
+      state.endPreview();
       restoringProject = true;
       projectRestoringRef.current = true;
       recoveryGeneration++;
@@ -7273,6 +7710,7 @@ export default function Home() {
           piece.dynamicAxleConnections = saved.dynamicAxleConnections;
           piece.editorAssemblyId = saved.editorAssemblyId;
           piece.editorAssemblyDetached = saved.editorAssemblyDetached;
+          piece.groupId = saved.groupId;
           piece.editorCardanReferenceConnector = saved.editorCardanReferenceConnector;
           piece.rotationPivotLocal = saved.rotationPivotLocal
             ? new THREE.Vector3().fromArray(saved.rotationPivotLocal)
@@ -7382,6 +7820,16 @@ export default function Home() {
           return [connection];
         });
         restoreLegacyCardanEditorAssemblies(state.pieces, state.connections);
+        state.groups = sanitizeGroups(document.groups);
+        state.animation = sanitizeAnimation(document.animation);
+        state.animation.tracks = state.animation.tracks.flatMap((track) => {
+          if (track.target.kind === "group") return [track];
+          const piece = piecesById.get(track.target.id);
+          return piece
+            ? [{ ...track, target: { kind: "piece" as const, id: String(piece.id) } }]
+            : [];
+        });
+        pruneGroupsAndTracks(state.pieces, state.groups, state.animation);
         state.gearLinks = document.gearLinks.flatMap((saved) => {
           const a = piecesById.get(saved.a),
             b = piecesById.get(saved.b);
@@ -10439,6 +10887,8 @@ export default function Home() {
     s.pieces = s.pieces.filter((x) => x !== p);
     s.rebuildRenderBatches();
     s.connections = s.connections.filter((c) => c.a !== p && c.b !== p);
+    pruneGroupsAndTracks(s.pieces, s.groups, s.animation);
+    setAnimRev((value) => value + 1);
     rebalanceAllSmartDefaults(s);
     s.selected = undefined;
     s.refreshDebug();
@@ -10464,6 +10914,9 @@ export default function Home() {
       if (band.visual) s.scene.remove(band.visual);
       disposeRubberBand(band);
     });
+    s.endPreview();
+    s.groups = [];
+    s.animation = emptyAnimation();
     s.rubberBands = [];
     s.pieces = [];
     s.connections = [];
@@ -11088,6 +11541,326 @@ export default function Home() {
     importTokenRef.current++;
     setImportDraft(null);
   };
+
+  // --- Groups, animation timeline, GLB export and model fixer ---------------
+  const touchAnimation = () => {
+    setAnimRev((value) => value + 1);
+    appRef.current?.scheduleRecoverySave();
+  };
+  const selectionGroup = () => {
+    const s = appRef.current;
+    return s?.selected?.groupId ? s.groups.find((g) => g.id === s.selected!.groupId) : undefined;
+  };
+  const animationTarget = (): (TrackTarget & { label: string }) | null => {
+    const s = appRef.current,
+      piece = s?.selected;
+    if (!s || !piece) return null;
+    const group = selectionGroup();
+    return group
+      ? { kind: "group", id: group.id, label: group.name }
+      : { kind: "piece", id: String(piece.id), label: `${piece.part} · ${piece.name}` };
+  };
+  const restPosition = (piece: Piece) =>
+    appRef.current?.previewRest?.get(piece)?.position ?? piece.mesh.position;
+  const seekAnimation = (time: number) => {
+    const s = appRef.current;
+    if (!s) return;
+    const clamped = Math.min(s.animation.duration, Math.max(0, time));
+    animTimeRef.current = clamped;
+    setAnimTime(clamped);
+    s.setPreviewTime(clamped);
+    setPreviewActive(true);
+  };
+  const groupSelected = () => {
+    const s = appRef.current;
+    if (!s || running) return;
+    const members = [...s.selectedPieces];
+    if (members.length < 2) {
+      setMessage(t.groupNeedTwo);
+      return;
+    }
+    s.endPreview();
+    s.recordHistory();
+    const group = createGroup(members, s.groups);
+    pruneGroupsAndTracks(s.pieces, s.groups, s.animation);
+    setMessage(group ? `${t.groupCreated}: ${group.name} · ${members.length}` : t.groupNeedTwo);
+    setTimelineOpen(true);
+    touchAnimation();
+  };
+  const ungroupSelected = () => {
+    const s = appRef.current;
+    if (!s || !s.selected?.groupId || running) return;
+    s.endPreview();
+    s.recordHistory();
+    ungroupPiece(s.selected, s.pieces, s.groups);
+    pruneGroupsAndTracks(s.pieces, s.groups, s.animation);
+    setMessage(t.groupRemoved);
+    touchAnimation();
+  };
+  const ensureTrack = (target: TrackTarget) => {
+    const s = appRef.current!;
+    let track = findTrack(s.animation, target);
+    if (!track) {
+      track = { id: newTrackId(), target: { kind: target.kind, id: target.id }, keys: [] };
+      s.animation.tracks.push(track);
+    }
+    return track;
+  };
+  const addKeyAtTime = () => {
+    const s = appRef.current,
+      target = animationTarget();
+    if (!s || !target) return;
+    s.recordHistory();
+    const track = ensureTrack(target),
+      key = keyAt(track.keys.length ? track : undefined, animTimeRef.current);
+    upsertKey(track, key);
+    setSelectedKey({ trackId: track.id, index: track.keys.indexOf(track.keys.find((k) => Math.abs(k.t - key.t) < 1e-3)!) });
+    touchAnimation();
+    seekAnimation(animTimeRef.current);
+  };
+  const spinTarget = (axis: "x" | "y" | "z", turns: number) => {
+    const s = appRef.current,
+      target = animationTarget();
+    if (!s || !target) return;
+    s.recordHistory();
+    const track = ensureTrack(target),
+      vector: [number, number, number] = [axis === "x" ? 1 : 0, axis === "y" ? 1 : 0, axis === "z" ? 1 : 0];
+    track.keys = spinKeys(vector, turns, s.animation.duration);
+    setSelectedKey({ trackId: track.id, index: 1 });
+    touchAnimation();
+    seekAnimation(animTimeRef.current);
+  };
+  const toRotationVector = (q: THREE.Quaternion): [number, number, number] => {
+    const unit = q.clone().normalize();
+    if (unit.w < 0) unit.set(-unit.x, -unit.y, -unit.z, -unit.w);
+    const angle = 2 * Math.acos(Math.min(1, unit.w)),
+      scale = Math.sqrt(Math.max(0, 1 - unit.w * unit.w));
+    if (scale < 1e-6 || angle < 1e-6) return [0, 0, 0];
+    const degrees = THREE.MathUtils.radToDeg(angle);
+    return [(unit.x / scale) * degrees, (unit.y / scale) * degrees, (unit.z / scale) * degrees];
+  };
+  const beginPose = () => {
+    const s = appRef.current;
+    if (!s || !animationTarget()) return;
+    s.recordHistory();
+    s.setPreviewTime(animTimeRef.current);
+    setPreviewActive(true);
+    setAnimPlaying(false);
+    setPosing(true);
+  };
+  const capturePose = () => {
+    const s = appRef.current,
+      target = animationTarget(),
+      anchor = s?.selected;
+    if (!s || !target || !anchor || !s.previewRest) return;
+    const rest = s.previewRest.get(anchor);
+    if (!rest) return;
+    let offset: THREE.Vector3, rotation: THREE.Quaternion;
+    rotation = anchor.mesh.quaternion.clone().multiply(rest.quaternion.clone().invert());
+    if (target.kind === "group") {
+      const group = s.groups.find((g) => g.id === target.id)!,
+        pivot = new THREE.Vector3().fromArray(group.pivot);
+      offset = anchor.mesh.position
+        .clone()
+        .sub(rest.position.clone().sub(pivot).applyQuaternion(rotation).add(pivot));
+    } else offset = anchor.mesh.position.clone().sub(rest.position);
+    const track = ensureTrack(target),
+      key: Keyframe = {
+        t: animTimeRef.current,
+        p: [offset.x, offset.y, offset.z],
+        r: toRotationVector(rotation),
+        e: "easeInOut",
+      };
+    upsertKey(track, key);
+    setPosing(false);
+    touchAnimation();
+    seekAnimation(animTimeRef.current);
+  };
+  const cancelPose = () => {
+    setPosing(false);
+    seekAnimation(animTimeRef.current);
+  };
+  const updateKey = (patch: Partial<Keyframe>) => {
+    const s = appRef.current;
+    if (!s || !selectedKey) return;
+    const track = s.animation.tracks.find((tr) => tr.id === selectedKey.trackId),
+      key = track?.keys[selectedKey.index];
+    if (!track || !key) return;
+    Object.assign(key, patch);
+    key.t = Math.min(s.animation.duration, Math.max(0, key.t));
+    track.keys.sort((a, b) => a.t - b.t);
+    setSelectedKey({ trackId: track.id, index: track.keys.indexOf(key) });
+    touchAnimation();
+    if (previewActive) seekAnimation(animTimeRef.current);
+  };
+  const deleteKey = () => {
+    const s = appRef.current;
+    if (!s || !selectedKey) return;
+    const track = s.animation.tracks.find((tr) => tr.id === selectedKey.trackId);
+    if (!track) return;
+    track.keys.splice(selectedKey.index, 1);
+    if (!track.keys.length) s.animation.tracks = s.animation.tracks.filter((tr) => tr !== track);
+    setSelectedKey(null);
+    touchAnimation();
+    if (previewActive) seekAnimation(animTimeRef.current);
+  };
+  const removeTrack = (trackId: string) => {
+    const s = appRef.current;
+    if (!s) return;
+    s.animation.tracks = s.animation.tracks.filter((tr) => tr.id !== trackId);
+    setSelectedKey(null);
+    touchAnimation();
+    if (previewActive) seekAnimation(animTimeRef.current);
+  };
+  const editGroup = (change: (group: NonNullable<ReturnType<typeof selectionGroup>>) => void) => {
+    const group = selectionGroup();
+    if (!group) return;
+    change(group);
+    touchAnimation();
+    if (previewActive) seekAnimation(animTimeRef.current);
+  };
+  const exportGlb = async () => {
+    const s = appRef.current;
+    if (!s || exportBusy) return;
+    setExportBusy(true);
+    try {
+      const mod = await import("./export-gltf");
+      const result = await s.runAtRest(() =>
+        mod.exportGLB(
+          { pieces: s.pieces, groups: s.groups, animation: s.animation },
+          exportOptions,
+        ),
+      );
+      const file = `${(projectNameRef.current || "model").replace(/[^\w.-]+/g, "_")}.glb`,
+        url = URL.createObjectURL(new Blob([result.glb], { type: "model/gltf-binary" })),
+        link = document.createElement("a");
+      link.href = url;
+      link.download = file;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 4000);
+      setExportInfo({
+        file,
+        stats: result.stats,
+        snippet: mod.usageSnippet(result, file),
+        viewer: mod.exampleViewerHtml(file, !!result.clipName),
+      });
+      setMessage(`${t.exported}: ${file} · ${(result.stats.bytes / 1048576).toFixed(2)} MB`);
+    } catch (error) {
+      setMessage(`${t.exportFailed}: ${error instanceof Error ? error.message : error}`);
+    } finally {
+      setExportBusy(false);
+    }
+  };
+  const downloadText = (name: string, text: string, type: string) => {
+    const url = URL.createObjectURL(new Blob([text], { type })),
+      link = document.createElement("a");
+    link.href = url;
+    link.download = name;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 4000);
+  };
+  const runFixer = async () => {
+    const s = appRef.current;
+    if (!s || fixerBusy || running) return;
+    setFixerBusy(true);
+    setFixerReport(null);
+    setMessage(t.fixerRunning);
+    try {
+      const report = await s.fixModel(fixerOptions);
+      setFixerReport(report);
+      setSelectedId(null);
+      setCount(s.pieces.length);
+      setConnectionRevision((value) => value + 1);
+      setAnimRev((value) => value + 1);
+      setMessage(t.fixerDone);
+    } catch (error) {
+      setMessage(`${t.fixerFailed}: ${error instanceof Error ? error.message : error}`);
+    } finally {
+      setFixerBusy(false);
+    }
+  };
+  const replaceParts = async () => {
+    const s = appRef.current;
+    if (!s || fixerBusy || running) return;
+    const from = replaceFrom.trim().toLowerCase(),
+      to = replaceTo.trim().replace(/\.dat$/i, "").toLowerCase(),
+      targets = from ? s.pieces.filter((piece) => piece.part.toLowerCase() === from) : [...s.pieces];
+    if (!targets.length) {
+      setMessage(t.replaceNone);
+      return;
+    }
+    let catalog: CatalogPart | undefined;
+    if (to) {
+      const resolved = resolvePaletteRequest(to),
+        known = paletteParts.find((part) => part.part.toLowerCase() === resolved);
+      catalog = known ?? {
+        part: to,
+        name: `LDraw ${to}`,
+        kind: kindFor("", ""),
+        color: 71,
+        origin: "catalog-search",
+        sourceKind: "ldraw-network",
+        requestedPart: to,
+        resolvedPart: to,
+      };
+    }
+    setFixerBusy(true);
+    setMessage(t.fixerRunning);
+    try {
+      s.recordHistory();
+      const { count } = await s.replacePieces(targets, catalog);
+      setSelectedId(null);
+      setCount(s.pieces.length);
+      setConnectionRevision((value) => value + 1);
+      setAnimRev((value) => value + 1);
+      setMessage(`${t.replaced}: ${count}/${targets.length}`);
+      s.scheduleRecoverySave();
+    } catch (error) {
+      setMessage(`${t.fixerFailed}: ${error instanceof Error ? error.message : error}`);
+    } finally {
+      setFixerBusy(false);
+    }
+  };
+  useEffect(() => {
+    if (!animPlaying) return;
+    let frame = 0,
+      last = performance.now();
+    const tick = (now: number) => {
+      const s = appRef.current;
+      if (!s) return;
+      let time = animTimeRef.current + ((now - last) / 1000) * animSpeed;
+      last = now;
+      if (time >= s.animation.duration) {
+        if (s.animation.loop) time %= s.animation.duration;
+        else {
+          time = s.animation.duration;
+          setAnimPlaying(false);
+        }
+      }
+      animTimeRef.current = time;
+      s.setPreviewTime(time);
+      setAnimTime(time);
+      setPreviewActive(true);
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [animPlaying, animSpeed]);
+  const timelineRows = (() => {
+    const s = appRef.current;
+    if (!s) return [];
+    void animRev;
+    return s.animation.tracks.map((track: Track) => {
+      const group = track.target.kind === "group" ? s.groups.find((g) => g.id === track.target.id) : undefined,
+        piece = track.target.kind === "piece" ? s.pieces.find((p) => String(p.id) === track.target.id) : undefined;
+      return {
+        id: track.id,
+        kind: track.target.kind,
+        label: group?.name ?? (piece ? `${piece.part} · ${piece.name}` : track.target.id),
+        keys: track.keys,
+      };
+    });
+  })();
 
   const exportModel = () => {
     const s = appRef.current;
@@ -13056,15 +13829,279 @@ export default function Home() {
           <button className="ghost" onClick={exportModel}>
             {t.export}
           </button>
-          <button
-            className={running ? "stop" : "play"}
-            onClick={physics}
-            disabled={physicsBusy}
-          >
-            {physicsBusy ? "…" : running ? t.stop : t.simulate}
+          <button className="ghost" disabled={running} onClick={groupSelected} title={t.groupHelp}>
+            ⛓ {t.group}
           </button>
+          <button className="ghost" disabled={running} onClick={ungroupSelected}>
+            {t.ungroup}
+          </button>
+          <button className="ghost" disabled={running} onClick={() => setFixerOpen(true)}>
+            🛠 {t.fixer}
+          </button>
+          <button
+            className="ghost"
+            onClick={() => {
+              setExportInfo(null);
+              setExportOpen(true);
+            }}
+          >
+            ⬇ GLB
+          </button>
+          <button
+            className={timelineOpen ? "play" : "ghost"}
+            disabled={running}
+            onClick={() => {
+              if (timelineOpen) {
+                appRef.current?.endPreview();
+                setAnimPlaying(false);
+              }
+              setTimelineOpen(!timelineOpen);
+            }}
+          >
+            ▶ {t.animate}
+          </button>
+          {legacyPhysics && (
+            <button
+              className={running ? "stop" : "ghost"}
+              onClick={physics}
+              disabled={physicsBusy}
+              title={t.legacyPhysics}
+            >
+              {physicsBusy ? "…" : running ? t.stop : t.simulate}
+            </button>
+          )}
         </div>
       </header>
+      {timelineOpen && (
+        <TimelinePanel
+          labels={t as unknown as Record<string, string>}
+          duration={appRef.current?.animation.duration ?? 5}
+          loop={appRef.current?.animation.loop ?? true}
+          time={animTime}
+          playing={animPlaying}
+          speed={animSpeed}
+          previewActive={previewActive}
+          posing={posing}
+          rows={timelineRows}
+          targetLabel={animationTarget()?.label ?? null}
+          group={(() => {
+            const group = selectionGroup(),
+              s = appRef.current;
+            return group && s
+              ? {
+                  id: group.id,
+                  name: group.name,
+                  pivot: group.pivot,
+                  parts: s.pieces
+                    .filter((p) => p.groupId === group.id)
+                    .map((p) => ({ id: p.id, label: `${p.part} · ${p.name}` })),
+                }
+              : null;
+          })()}
+          selectedKey={selectedKey}
+          onPlayPause={() => {
+            if (!animPlaying) seekAnimation(animTimeRef.current);
+            setAnimPlaying(!animPlaying);
+          }}
+          onStop={() => {
+            setAnimPlaying(false);
+            animTimeRef.current = 0;
+            setAnimTime(0);
+            appRef.current?.endPreview();
+          }}
+          onSeek={seekAnimation}
+          onSpeed={setAnimSpeed}
+          onDuration={(seconds) => {
+            const s = appRef.current;
+            if (!s || !Number.isFinite(seconds)) return;
+            s.animation.duration = Math.min(600, Math.max(0.1, seconds));
+            touchAnimation();
+          }}
+          onLoop={(loop) => {
+            if (appRef.current) appRef.current.animation.loop = loop;
+            touchAnimation();
+          }}
+          onEditPose={() => {
+            setAnimPlaying(false);
+            appRef.current?.endPreview();
+          }}
+          onAddKey={addKeyAtTime}
+          onSpin={spinTarget}
+          onBeginPose={beginPose}
+          onCapturePose={capturePose}
+          onCancelPose={cancelPose}
+          onSelectKey={setSelectedKey}
+          onUpdateKey={updateKey}
+          onDeleteKey={deleteKey}
+          onRemoveTrack={removeTrack}
+          onRenameGroup={(name) => editGroup((group) => (group.name = name.slice(0, 40)))}
+          onPivot={(pivot) => editGroup((group) => (group.pivot = pivot))}
+          onPivotFromPart={(partId) =>
+            editGroup((group) => {
+              const piece = appRef.current?.pieces.find((p) => p.id === partId);
+              if (piece) group.pivot = restPosition(piece).toArray() as [number, number, number];
+            })
+          }
+          onPivotFromBounds={() =>
+            editGroup((group) => {
+              const members = appRef.current?.pieces.filter((p) => p.groupId === group.id) ?? [],
+                box = new THREE.Box3();
+              members.forEach((p) => box.expandByPoint(restPosition(p)));
+              if (!box.isEmpty())
+                group.pivot = box.getCenter(new THREE.Vector3()).toArray() as [number, number, number];
+            })
+          }
+          onClose={() => {
+            appRef.current?.endPreview();
+            setAnimPlaying(false);
+            setTimelineOpen(false);
+          }}
+        />
+      )}
+      {exportOpen && (
+        <div
+          className="project-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setExportOpen(false);
+          }}
+        >
+          <section className="project-dialog settings-dialog" role="dialog" aria-modal="true">
+            <div className="project-dialog-head">
+              <div>
+                <small>THREE.JS · GLB</small>
+                <h2>{t.exportGlb}</h2>
+              </div>
+              <button className="project-close" onClick={() => setExportOpen(false)} aria-label={t.close}>
+                ×
+              </button>
+            </div>
+            <div className="settings-body">
+              <p className="settings-help">{t.exportGlbHelp}</p>
+              <div className="settings-row">
+                <span>{t.exportUnits}</span>
+                <div className="settings-choice">
+                  {(["meters", "studs"] as const).map((units) => (
+                    <button
+                      key={units}
+                      type="button"
+                      className={exportOptions.units === units ? "active" : ""}
+                      onClick={() => setExportOptions({ ...exportOptions, units })}
+                    >
+                      {units === "meters" ? t.exportMeters : t.exportStuds}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <label className="settings-row">
+                <span>{t.exportAnimation}</span>
+                <input
+                  type="checkbox"
+                  checked={exportOptions.animation}
+                  onChange={(event) => setExportOptions({ ...exportOptions, animation: event.target.checked })}
+                />
+              </label>
+              <label className="settings-row">
+                <span>{t.exportOutlines}</span>
+                <input
+                  type="checkbox"
+                  checked={exportOptions.outlines}
+                  onChange={(event) => setExportOptions({ ...exportOptions, outlines: event.target.checked })}
+                />
+              </label>
+              <button type="button" className="primary settings-reload" disabled={exportBusy} onClick={() => void exportGlb()}>
+                {exportBusy ? "…" : t.exportDownload}
+              </button>
+              {exportInfo && (
+                <>
+                  <p className="settings-help">
+                    {exportInfo.stats.parts} {t.parts} · {exportInfo.stats.groups} {t.group} ·{" "}
+                    {exportInfo.stats.uniqueMeshes} meshes · {exportInfo.stats.triangles.toLocaleString()} △ ·{" "}
+                    {exportInfo.stats.tracks} tracks · {(exportInfo.stats.bytes / 1048576).toFixed(2)} MB
+                  </p>
+                  <pre className="export-snippet">{exportInfo.snippet}</pre>
+                  <button
+                    type="button"
+                    onClick={() => downloadText("viewer.html", exportInfo.viewer, "text/html")}
+                  >
+                    {t.exportViewer}
+                  </button>
+                </>
+              )}
+            </div>
+          </section>
+        </div>
+      )}
+      {fixerOpen && (
+        <div
+          className="project-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget && !fixerBusy) setFixerOpen(false);
+          }}
+        >
+          <section className="project-dialog settings-dialog" role="dialog" aria-modal="true">
+            <div className="project-dialog-head">
+              <div>
+                <small>SIM STUDIO</small>
+                <h2>{t.fixer}</h2>
+              </div>
+              <button className="project-close" onClick={() => setFixerOpen(false)} aria-label={t.close}>
+                ×
+              </button>
+            </div>
+            <div className="settings-body">
+              <p className="settings-help">{t.fixerHelp}</p>
+              {(
+                [
+                  ["rebuild", t.fixerRebuild],
+                  ["realign", t.fixerRealign],
+                  ["motors", t.fixerMotors],
+                ] as const
+              ).map(([key, label]) => (
+                <label className="settings-row" key={key}>
+                  <span>{label}</span>
+                  <input
+                    type="checkbox"
+                    checked={fixerOptions[key]}
+                    onChange={(event) => setFixerOptions({ ...fixerOptions, [key]: event.target.checked })}
+                  />
+                </label>
+              ))}
+              <button type="button" className="primary settings-reload" disabled={fixerBusy || running} onClick={() => void runFixer()}>
+                {fixerBusy ? "…" : t.fixerRun}
+              </button>
+              {fixerReport && (
+                <p className="settings-help">
+                  {t.fixerRebuilt}: {fixerReport.rebuilt} · {t.fixerSnapped}: {fixerReport.rotationsSnapped} ·{" "}
+                  {t.fixerRealigned}: {fixerReport.realigned} · {t.fixerConnections}: {fixerReport.connections} ·{" "}
+                  {t.fixerMotorsDone}: {fixerReport.motorsConverted}
+                  {fixerReport.motorsSkipped ? ` (+${fixerReport.motorsSkipped} ${t.fixerSkipped})` : ""}
+                </p>
+              )}
+              <h3>{t.replaceParts}</h3>
+              <p className="settings-help">{t.replacePartsHelp}</p>
+              <div className="settings-row">
+                <input
+                  type="text"
+                  placeholder={t.replaceFrom}
+                  value={replaceFrom}
+                  onChange={(event) => setReplaceFrom(event.target.value)}
+                />
+                <input
+                  type="text"
+                  placeholder={t.replaceTo}
+                  value={replaceTo}
+                  onChange={(event) => setReplaceTo(event.target.value)}
+                />
+              </div>
+              <button type="button" disabled={fixerBusy || running} onClick={() => void replaceParts()}>
+                {fixerBusy ? "…" : t.replaceRun}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
       {settingsOpen && (
         <div
           className="project-backdrop"
@@ -13187,6 +14224,22 @@ export default function Home() {
                   </button>
                 </div>
               </div>
+              <label className="settings-row">
+                <span>{t.legacyPhysics}</span>
+                <input
+                  type="checkbox"
+                  checked={legacyPhysics}
+                  onChange={(event) => {
+                    setLegacyPhysics(event.target.checked);
+                    try {
+                      localStorage.setItem(
+                        "sim-studio:legacy-physics",
+                        event.target.checked ? "1" : "0",
+                      );
+                    } catch {}
+                  }}
+                />
+              </label>
               <h3>{t.settingsSystem}</h3>
               <p className="settings-help">{t.reloadAllModelsHelp}</p>
               <button

@@ -1,3 +1,4 @@
+import type { RestPose } from "../animation-runtime";
 /**
  * Shared runtime types for the editor.
  *
@@ -421,6 +422,16 @@ export type AppState = {
   recolorPart: (piece: Piece, color: number) => Promise<boolean>;
   /** Clears LDraw caches and re-downloads the model of the given pieces. */
   forceReloadParts: (pieces: Piece[]) => Promise<number>;
+  /** Animation preview: poses every piece at `time` (rest pose captured on first call). */
+  previewRest: Map<Piece, RestPose> | null;
+  previewTime: number;
+  setPreviewTime: (time: number) => void;
+  /** Restores the rest pose; returns true if a preview was active. */
+  endPreview: () => boolean;
+  runAtRest: <T>(task: () => Promise<T> | T) => Promise<T>;
+  /** Rebuilds parts from LDraw with fresh connectors and ids, optionally as another part number. */
+  replacePieces: (pieces: Piece[], to?: CatalogPart) => Promise<{ count: number }>;
+  fixModel: (options: { rebuild: boolean; realign: boolean; motors: boolean }) => Promise<FixReport>;
   renderImportPreview: (parts: PreparedImportPlacement[]) => Promise<string>;
   verifyConnections: () => number;
   verifyConnectionsAsync: () => Promise<number>;
@@ -458,4 +469,14 @@ export type AppState = {
   simLog?: SimulationLog;
   nextLogSample?: number;
   simStartedMs?: number;
+};
+
+export type FixReport = {
+  rebuilt: number;
+  rotationsSnapped: number;
+  realigned: number;
+  connections: number;
+  motorsConverted: number;
+  motorsSkipped: number;
+  groupsPruned: number;
 };

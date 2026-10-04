@@ -3549,3 +3549,36 @@ body.resizing-inspector * {
 .studio.dark .settings-help {
   color: #aab4bb;
 }
+
+/* --- Timeline, export and fixer ------------------------------------------ */
+.timeline-panel{position:fixed;left:0;right:0;bottom:0;z-index:40;max-height:44vh;display:flex;flex-direction:column;background:var(--panel,#1d2126);color:inherit;border-top:1px solid rgba(128,128,128,.35);box-shadow:0 -8px 24px rgba(0,0,0,.25);font-size:12px}
+.timeline-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid rgba(128,128,128,.25)}
+.timeline-bar button,.timeline-side button,.timeline-editor button{padding:4px 9px}
+.timeline-play{min-width:36px}
+.timeline-clock{font-variant-numeric:tabular-nums;min-width:96px}
+.timeline-scrub{flex:1 1 160px;min-width:120px}
+.timeline-mini{display:flex;align-items:center;gap:4px}
+.timeline-mini input[type=number]{width:60px}
+.timeline-close{margin-left:auto}
+.timeline-body{display:grid;grid-template-columns:170px minmax(0,1fr) 230px;gap:0;min-height:0;overflow:auto}
+.timeline-side,.timeline-editor{display:flex;flex-direction:column;gap:6px;padding:8px 10px;overflow:auto}
+.timeline-side{border-right:1px solid rgba(128,128,128,.25)}
+.timeline-editor{border-left:1px solid rgba(128,128,128,.25)}
+.timeline-spin{display:flex;align-items:center;gap:4px}
+.timeline-tracks{position:relative;overflow:auto;padding:0 8px 8px}
+.timeline-ruler{position:relative;height:22px;margin-left:140px;cursor:col-resize;border-bottom:1px solid rgba(128,128,128,.3);touch-action:none}
+.timeline-ruler i{position:absolute;top:4px;font-style:normal;font-size:10px;opacity:.7;transform:translateX(2px)}
+.timeline-head{position:absolute;top:0;bottom:0;width:2px;background:#ff5a4f;pointer-events:none}
+.timeline-row{display:flex;align-items:center;height:28px}
+.timeline-row.selected{background:rgba(120,160,255,.1)}
+.timeline-row-label{flex:0 0 140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:flex;align-items:center;gap:4px}
+.timeline-row-remove{margin-left:auto;padding:0 5px!important;background:transparent;border:0;opacity:.6}
+.timeline-lane{position:relative;flex:1;height:100%;border-bottom:1px dashed rgba(128,128,128,.2);cursor:pointer}
+.timeline-key{position:absolute;top:50%;width:12px;height:12px;padding:0!important;margin:-6px 0 0 -6px;transform:rotate(45deg);border-radius:2px;background:#f2b84b;border:1px solid #000}
+.timeline-key.active{background:#fff;outline:2px solid #4b9bf2}
+.timeline-empty{padding:12px;opacity:.7}
+.timeline-field{display:flex;align-items:center;gap:4px}
+.timeline-field>span{flex:0 0 58px}
+.timeline-field input[type=number],.timeline-field input[type=text],.timeline-field select{width:100%;min-width:0}
+.export-snippet{max-height:200px;overflow:auto;font-size:11px;padding:8px;background:rgba(128,128,128,.15);border-radius:6px;white-space:pre}
+@media (max-width:900px){.timeline-body{grid-template-columns:1fr}.timeline-side,.timeline-editor{border:0}}
