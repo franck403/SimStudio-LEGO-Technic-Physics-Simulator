@@ -17,6 +17,7 @@ import { mergeGeometries, mergeVertices } from "three/addons/utils/BufferGeometr
 import type { Piece } from "./editor/types";
 import { buildNodeTracks, type AnimationDoc, type GroupDef, type Track } from "./animation.ts";
 import { animationModule } from "./export-code.ts";
+import { listSubparts, splitSubTargetId, subPivot, subTargetId } from "./subparts.ts";
 
 export type ExportOptions = {
   /** "studs": 1 unit = 1 stud. "meters": real size (1 stud = 8 mm). */
@@ -153,13 +154,28 @@ const prototypeKey = (piece: Piece) =>
     piece.embeddedGeometry ? (piece.projectAssetKey ?? "embedded") : "",
   ].join("|");
 
-function buildPrototype(piece: Piece, outlines: boolean): Prototype | undefined {
+type PrototypeFilter = {
+  /** Only these objects contribute (sub-part export). */
+  include?: (object: THREE.Object3D) => boolean;
+  /** Geometry is re-centred on this point (the sub-part pivot). */
+  shift?: THREE.Vector3;
+};
+
+function buildPrototype(
+  piece: Piece,
+  outlines: boolean,
+  filter: PrototypeFilter = {},
+): Prototype | undefined {
   piece.mesh.updateMatrixWorld(true);
-  const inverse = piece.mesh.matrixWorld.clone().invert(),
+  const recentre = filter.shift
+      ? new THREE.Matrix4().makeTranslation(-filter.shift.x, -filter.shift.y, -filter.shift.z)
+      : new THREE.Matrix4(),
+    inverse = recentre.multiply(piece.mesh.matrixWorld.clone().invert()),
     buckets = new Map<string, { material: THREE.Material; geometries: THREE.BufferGeometry[] }>(),
     linePositions: number[] = [];
   piece.mesh.traverse((object) => {
     if ((object as THREE.InstancedMesh).isInstancedMesh) return;
+    if (filter.include && !filter.include(object)) return;
     if (object instanceof THREE.Mesh) {
       const matrix = inverse.clone().multiply(object.matrixWorld),
         mirrored = matrix.determinant() < 0;
@@ -248,7 +264,18 @@ export function buildExportScene(input: ExportInput, options: ExportOptions) {
   const groupById = new Map(input.groups.map((group) => [group.id, group])),
     groupNodes = new Map<string, THREE.Object3D>(),
     pieceNodes = new Map<string, THREE.Object3D>(),
+    subNodes = new Map<string, THREE.Object3D>(),
     groupNames: ExportResult["groupNames"] = [];
+  // Sub-part tracks: pieceId -> animated sub-part keys.
+  const animatedSubs = new Map<string, Set<string>>();
+  if (options.animation)
+    input.animation.tracks.forEach((track) => {
+      if (track.target.kind !== "sub" || !track.keys.length) return;
+      const { pieceId, key } = splitSubTargetId(track.target.id),
+        keys = animatedSubs.get(pieceId) ?? new Set<string>();
+      keys.add(key);
+      animatedSubs.set(pieceId, keys);
+    });
   const members = new Map<string, number>();
   input.pieces.forEach((piece) => {
     if (piece.groupId && groupById.has(piece.groupId))
@@ -270,6 +297,52 @@ export function buildExportScene(input: ExportInput, options: ExportOptions) {
   const countedPrototypes = new Set<Prototype>();
   for (const piece of input.pieces) {
     if (!piece.mesh.visible && !piece.renderBatched) continue;
+    const animatedKeys = animatedSubs.get(String(piece.id));
+    if (animatedKeys) {
+      const infos = listSubparts(piece.mesh).filter((info) => animatedKeys.has(info.key));
+      if (infos.length) {
+        const holder = new THREE.Group(),
+          groupOf = piece.groupId ? groupById.get(piece.groupId) : undefined,
+          holderParent = groupOf ? groupNodes.get(groupOf.id) : undefined;
+        holder.name = unique(`${safeName(piece.part)}_${piece.id}`);
+        holder.userData = {
+          simStudio: { type: "part", id: piece.id, part: piece.part, name: piece.name, color: piece.color },
+        };
+        holder.position.copy(piece.mesh.position);
+        if (holderParent && groupOf) holder.position.sub(new THREE.Vector3().fromArray(groupOf.pivot));
+        holder.quaternion.copy(piece.mesh.quaternion);
+        holder.scale.copy(piece.mesh.scale);
+        const body = buildPrototype(piece, options.outlines, {
+          include: (object) => !(typeof object.userData?.sub === "string" && animatedKeys.has(object.userData.sub)),
+        });
+        if (body) {
+          holder.add(new THREE.Mesh(body.geometry, body.material));
+          triangles += body.triangles;
+          vertices += body.vertices;
+        }
+        for (const info of infos) {
+          const pivot = subPivot(piece.mesh, info),
+            proto = buildPrototype(piece, options.outlines, {
+              include: (object) => object.userData?.sub === info.key,
+              shift: new THREE.Vector3().fromArray(pivot),
+            });
+          if (!proto) continue;
+          const subNode = new THREE.Group();
+          subNode.name = unique(`${holder.name}_Sub_${safeName(info.label)}`);
+          subNode.position.fromArray(pivot);
+          subNode.userData = { simStudio: { type: "sub", name: `${piece.part} › ${info.label}`, key: info.key } };
+          subNode.add(new THREE.Mesh(proto.geometry, proto.material));
+          holder.add(subNode);
+          subNodes.set(subTargetId(piece.id, info.key), subNode);
+          triangles += proto.triangles;
+          vertices += proto.vertices;
+        }
+        (holderParent ?? root).add(holder);
+        pieceNodes.set(String(piece.id), holder);
+        parts++;
+        continue;
+      }
+    }
     const key = prototypeKey(piece);
     if (!prototypes.has(key)) prototypes.set(key, buildPrototype(piece, options.outlines) ?? null);
     const prototype = prototypes.get(key);
@@ -298,12 +371,18 @@ export function buildExportScene(input: ExportInput, options: ExportOptions) {
   input.extras?.forEach((extra) => root.add(extra));
 
   const clips: THREE.AnimationClip[] = [];
-  const trackNodes: { node: string; kind: "group" | "piece"; label: string; keys: Track["keys"] }[] = [];
+  const trackNodes: { node: string; kind: "group" | "piece" | "sub"; label: string; keys: Track["keys"] }[] = [];
   let trackCount = 0;
   if (options.animation) {
     const tracks: THREE.KeyframeTrack[] = [];
     input.animation.tracks.forEach((track) => {
-      const node = (track.target.kind === "group" ? groupNodes : pieceNodes).get(track.target.id);
+      const node = (
+        track.target.kind === "group"
+          ? groupNodes
+          : track.target.kind === "sub"
+            ? subNodes
+            : pieceNodes
+      ).get(track.target.id);
       if (!node || !track.keys.length) return;
       const built = buildNodeTracks(
         node.name,

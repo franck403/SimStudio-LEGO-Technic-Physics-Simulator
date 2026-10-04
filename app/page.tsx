@@ -47,6 +47,7 @@ import {
 } from "./model-fixer";
 import TimelinePanel, { type TimelineSelection } from "./components/TimelinePanel";
 import { mergeSubpartConnectors, subpartConnectors, type SubpartHit } from "./ldraw-subparts";
+import { listSubparts, splitSubTargetId, subTargetId } from "./subparts";
 import { extractStudioLDraw } from "./studio-io";
 import {
   approximateCollisionPrimitives,
@@ -1324,6 +1325,16 @@ export default function Home() {
   } | null>(null);
   const busyRef = useRef(false);
   const [videoOpen, setVideoOpen] = useState(false);
+  // Parts whose LDraw sub-parts are kept as separate meshes (animatable alone).
+  const splitPartsRef = useRef<Set<string>>(
+    (() => {
+      try {
+        return new Set<string>(JSON.parse(localStorage.getItem("brickreel:split-parts") ?? "[]"));
+      } catch {
+        return new Set<string>();
+      }
+    })(),
+  );
   // "Precision less": moves / turns below these limits are treated as zero when a
   // key is recorded, so a stray 0.025 stud drift cannot hide a pure rotation.
   const [animPrecision, setAnimPrecisionState] = useState<{ move: number; turn: number }>(() => {
@@ -1371,6 +1382,9 @@ export default function Home() {
   const [previewActive, setPreviewActive] = useState(false);
   const [posing, setPosing] = useState(false);
   const [selectedKey, setSelectedKey] = useState<TimelineSelection>(null);
+  // Sub-part of the selected piece being animated on its own (null = piece/group).
+  const [subTarget, setSubTarget] = useState<string | null>(null);
+  useEffect(() => setSubTarget(null), [selectedId]);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportCodeText, setExportCode] = useState("");
   const [exportBusy, setExportBusy] = useState(false);
@@ -2245,7 +2259,13 @@ export default function Home() {
       pool.load = (async (source: string, label: string, partName?: string) => {
         if (ldrawWorkers.available)
           try {
-            return (await ldrawWorkers.load(base, source, label, partName)) as THREE.Group;
+            return (await ldrawWorkers.load(
+              base,
+              source,
+              label,
+              partName,
+              !!partName && splitPartsRef.current.has(partName.toLowerCase()),
+            )) as THREE.Group;
           } catch (error) {
             if (!(error instanceof WorkerUnavailable)) throw error;
           }
@@ -3779,7 +3799,7 @@ export default function Home() {
       };
       const groups = new Map<string, Piece[]>();
       batchPieces
-        .filter((piece) => !state.rubberBands.some((band) => band.owner === piece))
+        .filter((piece) => !piece.noBatch && !state.rubberBands.some((band) => band.owner === piece))
         .forEach((piece) => {
           piece.mesh.traverse((child) => {
             if (child instanceof THREE.Mesh) child.castShadow = false;
@@ -5290,6 +5310,20 @@ export default function Home() {
     // --- Animation preview, part replacement and the model fixer ------------
     const setPreviewTime = (time: number) => {
       if (!state.previewRest) state.previewRest = captureRest(state.pieces);
+      const subOwners = new Set(
+        state.animation.tracks
+          .filter((track) => track.target.kind === "sub")
+          .map((track) => splitSubTargetId(track.target.id).pieceId),
+      );
+      let batchChanged = false;
+      for (const piece of state.pieces) {
+        const want = subOwners.has(String(piece.id));
+        if (!!piece.noBatch !== want) {
+          piece.noBatch = want;
+          batchChanged = true;
+        }
+      }
+      if (batchChanged) state.rebuildRenderBatches();
       state.previewTime = time;
       applyPose(state.pieces, state.previewRest, state.groups, state.animation, time);
       state.renderBatchesDirty = true;
@@ -5312,7 +5346,11 @@ export default function Home() {
       try {
         return await task();
       } finally {
-        if (current) restoreRest(current);
+        if (current) {
+          restoreRest(current);
+          // Sub-parts are not part of the captured rest map: pose them again.
+          applyPose(state.pieces, current, state.groups, state.animation, state.previewTime);
+        }
         state.renderBatchesDirty = true;
         state.requestRender();
       }
@@ -5415,8 +5453,14 @@ export default function Home() {
         }
       }
       state.animation.tracks.forEach((track) => {
-        const next = track.target.kind === "piece" ? idMap.get(track.target.id) : undefined;
-        if (next) track.target.id = next;
+        if (track.target.kind === "piece") {
+          const next = idMap.get(track.target.id);
+          if (next) track.target.id = next;
+        } else if (track.target.kind === "sub") {
+          const { pieceId, key } = splitSubTargetId(track.target.id),
+            next = idMap.get(pieceId);
+          if (next) track.target.id = subTargetId(next, key);
+        }
       });
       state.rebuildRenderBatches();
       await verifyConnectionsAsync();
@@ -11669,6 +11713,15 @@ export default function Home() {
     const s = appRef.current,
       piece = s?.selected;
     if (!s || !piece) return null;
+    if (subTarget) {
+      const info = listSubparts(piece.mesh).find((sub) => sub.key === subTarget);
+      if (info)
+        return {
+          kind: "sub",
+          id: subTargetId(piece.id, info.key),
+          label: `${piece.part} › ${info.label}`,
+        };
+    }
     const group = selectionGroup();
     return group
       ? { kind: "group", id: group.id, label: group.name }
@@ -11756,6 +11809,32 @@ export default function Home() {
   };
   // Records where the selected group/part is RIGHT NOW as a key at the current
   // time: move it with the gizmo, then press Add key.
+  // Reloads this part with its LDraw sub-parts kept apart, so one of them (a
+  // motor rotor, a shaft) can be animated while the rest of the part stays still.
+  const splitSelectedPart = async () => {
+    const s = appRef.current,
+      piece = s?.selected;
+    if (!s || !piece || running || busyRef.current) return;
+    [piece.part, piece.modelPart, piece.resolvedPart].forEach((name) => {
+      if (name) splitPartsRef.current.add(String(name).toLowerCase());
+    });
+    try {
+      localStorage.setItem("brickreel:split-parts", JSON.stringify([...splitPartsRef.current]));
+    } catch {}
+    const targets = s.pieces.filter((candidate) => candidate.part === piece.part);
+    s.recordHistory();
+    const { count } = await s.replacePieces(targets);
+    setSelectedId(piece.id);
+    setConnectionRevision((value) => value + 1);
+    setAnimRev((value) => value + 1);
+    setMessage(
+      listSubparts(piece.mesh).length
+        ? `${t.subSplitDone}: ${count}`
+        : t.subSplitNone,
+    );
+    s.scheduleRecoverySave();
+  };
+  const splitPart = blocking(t.fixerRunning, () => splitSelectedPart());
   const snapKeyPrecision = (key: Keyframe) => {
     const { move, turn } = animPrecisionRef.current;
     if (Math.hypot(key.p[0], key.p[1], key.p[2]) <= move) key.p = [0, 0, 0];
@@ -11778,6 +11857,22 @@ export default function Home() {
       anchor = s?.selected;
     if (!s || !base || !anchor) return;
     if (!s.previewRest) s.setPreviewTime(animTimeRef.current);
+    if (base.kind === "sub") {
+      // Sub-parts have no gizmo: the key holds the pose the track gives now and
+      // is then edited (offset / rotation) in the key panel or filled by Spin.
+      s.recordHistory();
+      const subTrack = ensureTrack(base),
+        at = animTimeRef.current;
+      if (!subTrack.keys.length && at > 0.001)
+        upsertKey(subTrack, { t: 0, p: [0, 0, 0], r: [0, 0, 0], e: "easeInOut" });
+      upsertKey(subTrack, keyAt(subTrack, at));
+      setSelectedKey({ trackId: subTrack.id, index: subTrack.keys.findIndex((k) => Math.abs(k.t - at) < 1e-3) });
+      setPosing(false);
+      setPreviewActive(true);
+      touchAnimation();
+      s.setPreviewTime(at);
+      return;
+    }
     const target = promoteToCluster(base);
     const rest = s.previewRest!.get(anchor);
     if (!rest) return;
@@ -12091,12 +12186,17 @@ export default function Home() {
     if (!s) return [];
     void animRev;
     return s.animation.tracks.map((track: Track) => {
-      const group = track.target.kind === "group" ? s.groups.find((g) => g.id === track.target.id) : undefined,
-        piece = track.target.kind === "piece" ? s.pieces.find((p) => String(p.id) === track.target.id) : undefined;
+      const subId = track.target.kind === "sub" ? splitSubTargetId(track.target.id) : null,
+        group = track.target.kind === "group" ? s.groups.find((g) => g.id === track.target.id) : undefined,
+        piece = track.target.kind === "piece" ? s.pieces.find((p) => String(p.id) === track.target.id) : undefined,
+        subPiece = subId ? s.pieces.find((p) => String(p.id) === subId.pieceId) : undefined,
+        subLabel = subPiece && subId ? listSubparts(subPiece.mesh).find((info) => info.key === subId.key)?.label : undefined;
       return {
         id: track.id,
         kind: track.target.kind,
-        label: group?.name ?? (piece ? `${piece.part} · ${piece.name}` : track.target.id),
+        label:
+          group?.name ??
+          (piece ? `${piece.part} · ${piece.name}` : subPiece ? `${subPiece.part} › ${subLabel ?? subId?.key}` : track.target.id),
         keys: track.keys,
       };
     });
@@ -14427,6 +14527,15 @@ export default function Home() {
             setAnimPlaying(false);
             appRef.current?.endPreview();
           }}
+          subparts={(() => {
+            const piece = appRef.current?.selected;
+            void animRev;
+            return piece ? listSubparts(piece.mesh).map((info) => ({ key: info.key, label: info.label })) : [];
+          })()}
+          subTarget={subTarget}
+          hasSelection={!!selectedId}
+          onSubTarget={setSubTarget}
+          onSplitPart={() => void splitPart()}
           precision={animPrecision}
           onPrecision={setAnimPrecision}
           onCleanKeys={cleanKeys}

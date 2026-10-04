@@ -6,7 +6,7 @@ import type { Ease, Keyframe } from "../animation.ts";
 export type TimelineRow = {
   id: string;
   label: string;
-  kind: "group" | "piece";
+  kind: "group" | "piece" | "sub";
   keys: Keyframe[];
 };
 
@@ -42,6 +42,11 @@ type Props = {
   onDuration: (seconds: number) => void;
   onLoop: (loop: boolean) => void;
   onEditPose: () => void;
+  subparts: { key: string; label: string }[];
+  subTarget: string | null;
+  hasSelection: boolean;
+  onSubTarget: (key: string | null) => void;
+  onSplitPart: () => void;
   precision: { move: number; turn: number };
   onPrecision: (precision: { move: number; turn: number }) => void;
   onCleanKeys: () => void;
@@ -249,10 +254,30 @@ export default function TimelinePanel(props: Props) {
           ) : (
             <>
               <b>{props.targetLabel ?? L.noTarget}</b>
+              {props.subparts.length > 0 && (
+                <select
+                  value={props.subTarget ?? ""}
+                  onChange={(event) => props.onSubTarget(event.target.value || null)}
+                  aria-label={L.subPart}
+                  title={L.subSplitHelp}
+                >
+                  <option value="">{L.subWhole}</option>
+                  {props.subparts.map((sub) => (
+                    <option key={sub.key} value={sub.key}>
+                      ⚙ {sub.label}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {props.hasSelection && props.subparts.length === 0 && (
+                <button type="button" onClick={props.onSplitPart} title={L.subSplitHelp}>
+                  ⚙ {L.subSplit}
+                </button>
+              )}
               <button type="button" disabled={!props.targetLabel} onClick={props.onAddKey}>
                 ◆ {L.addKey}
               </button>
-              <button type="button" disabled={!props.targetLabel} onClick={props.onBeginPose}>
+              <button type="button" disabled={!props.targetLabel || !!props.subTarget} onClick={props.onBeginPose}>
                 ✥ {L.poseKey}
               </button>
               <div className="timeline-spin">
@@ -305,7 +330,7 @@ export default function TimelinePanel(props: Props) {
                 }`}
               >
                 <span className="timeline-row-label" title={row.label}>
-                  {row.kind === "group" ? "▣ " : "● "}
+                  {row.kind === "group" ? "▣ " : row.kind === "sub" ? "⚙ " : "● "}
                   {row.label}
                   <button
                     type="button"

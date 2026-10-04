@@ -100,7 +100,7 @@ export function createLDrawWorkerPool(options: {
     reset() {
       workers.forEach((worker) => worker.postMessage({ type: "reset" }));
     },
-    async load(base: string, source: string, label: string, name?: string) {
+    async load(base: string, source: string, label: string, name?: string, split = false) {
       const fileMap = await options.fileMap;
       start(fileMap);
       if (broken || !workers.length) throw new WorkerUnavailable();
@@ -116,7 +116,7 @@ export function createLDrawWorkerPool(options: {
         }, options.timeout);
         pending.set(id, { resolve, reject, timer });
         owner.set(id, worker);
-        worker.postMessage({ type: "load", id, base, source, name });
+        worker.postMessage({ type: "load", id, base, source, name, split });
       });
     },
   };

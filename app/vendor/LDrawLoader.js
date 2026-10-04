@@ -1244,7 +1244,7 @@ class LDrawPartsGeometryCache {
 				const promise = parseCache.ensureDataLoaded( subobject.fileName ).then( () => {
 
 					const subobjectInfo = parseCache.getData( subobject.fileName, false );
-					if ( ! isPrimitiveType( subobjectInfo.type ) ) {
+					if ( ! isPrimitiveType( subobjectInfo.type ) || ( loader.separateSubparts && subobjectInfo.type === 'Subpart' ) ) {
 
 						return this.loadModel( subobject.fileName ).catch( error => {
 

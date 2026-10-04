@@ -24,7 +24,11 @@ export type Keyframe = {
   e: Ease;
 };
 
-export type TrackTarget = { kind: "group" | "piece"; id: string };
+/**
+ * "sub" targets one sub-part of a piece: id = `<pieceId>|<subKey>` (see
+ * subparts.ts). Its pose is relative to the piece, in the piece's local frame.
+ */
+export type TrackTarget = { kind: "group" | "piece" | "sub"; id: string };
 
 export type Track = {
   id: string;
@@ -88,7 +92,8 @@ export function sanitizeAnimation(value: unknown): AnimationDoc {
   const tracks: Track[] = [];
   for (const raw of Array.isArray(source.tracks) ? source.tracks : []) {
     const track = raw as Partial<Track>;
-    const kind = track.target?.kind === "piece" ? "piece" : "group",
+    const kind =
+        track.target?.kind === "piece" ? "piece" : track.target?.kind === "sub" ? "sub" : "group",
       id = typeof track.target?.id === "string" ? track.target.id : "";
     if (!id) continue;
     const keys = (Array.isArray(track.keys) ? track.keys : [])

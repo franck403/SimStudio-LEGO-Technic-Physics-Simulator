@@ -90,6 +90,8 @@ export type Piece = CatalogPart & {
   physicsIsland?: Piece[];
   physicsIslandFixed?: boolean;
   renderBatched?: boolean;
+  /** Kept out of instanced batches (a sub-part of it is animated on its own). */
+  noBatch?: boolean;
 };
 
 export type EditorPieceSnapshot = {

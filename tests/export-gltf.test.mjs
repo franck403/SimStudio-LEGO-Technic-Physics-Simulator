@@ -54,7 +54,7 @@ test("groups, shared meshes and the animation survive a GLB round trip", async (
   near(group.position.x, 1); // pivot = centre of the two parts
   near(group.children[0].position.x, -1);
   assert.equal(gltf.animations.length, 1);
-  assert.equal(gltf.animations[0].name, "SimStudio");
+  assert.equal(gltf.animations[0].name, "BrickReel");
   assert.equal(gltf.animations[0].tracks.length, 4);
   const spin = gltf.animations[0].tracks.find((t) => t.name.startsWith(group.name) && t.name.endsWith("quaternion"));
   assert.ok(spin.times.length >= 9);
@@ -67,7 +67,7 @@ test("groups, shared meshes and the animation survive a GLB round trip", async (
   const lifted = gltf.scene.getObjectByName(`3713_3`);
   near(lifted.position.y, 3);
   assert.equal(group.children[0].userData.simStudio?.part ?? "3713", "3713");
-  assert.equal(gltf.scene.children[0].userData.simStudio.generator, "Sim Studio");
+  assert.equal(gltf.scene.children[0].userData.simStudio.generator, "BrickReel");
   assert.match(usageSnippet(result, "model.glb"), /AnimationMixer/);
   assert.match(exampleViewerHtml("model.glb", true), /GLTFLoader/);
 });

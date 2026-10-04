@@ -20,7 +20,7 @@ type Init = {
   libraries: string[];
   configUrl?: string;
 };
-type Load = { type: "load"; id: number; base: string; source: string; name?: string };
+type Load = { type: "load"; id: number; base: string; source: string; name?: string; split?: boolean };
 type Reset = { type: "reset" };
 type Message = Init | Load | Reset;
 
@@ -32,10 +32,13 @@ let fileMap: Record<string, string> | null = null,
 type Lane = { instance: LDrawLoader; ready: Promise<unknown>; tail: Promise<unknown> };
 const lanes = new Map<string, Lane>();
 
-const laneFor = (base: string): Lane => {
-  let lane = lanes.get(base);
+const laneFor = (base: string, split = false): Lane => {
+  const laneKey = split ? `${base}#split` : base;
+  let lane = lanes.get(laneKey);
   if (lane) return lane;
   const instance = new LDrawLoader();
+  // Sub-parts (s/*.dat) stay separate meshes so they can be animated alone.
+  (instance as unknown as { separateSubparts: boolean }).separateSubparts = split;
   instance.setConditionalLineMaterial(LDrawConditionalLineMaterial);
   instance.setPartsLibraryPath(base);
   (instance as unknown as { fallbackLibraries: string[] }).fallbackLibraries = libraries.filter(
@@ -47,12 +50,12 @@ const laneFor = (base: string): Lane => {
     .catch(() => (base.includes("library.ldraw.org") ? undefined : instance.preloadMaterials(base + "LDConfig.ldr")))
     .catch(() => undefined);
   lane = { instance, ready, tail: Promise.resolve() };
-  lanes.set(base, lane);
+  lanes.set(laneKey, lane);
   return lane;
 };
 
 async function load(message: Load) {
-  const lane = laneFor(message.base);
+  const lane = laneFor(message.base, !!message.split);
   await lane.ready;
   const tracker = lane.instance as unknown as { missingFiles?: Set<string> };
   tracker.missingFiles?.clear();
@@ -72,7 +75,7 @@ async function load(message: Load) {
   } catch {
     // Hole primitives are a bonus; the mesh is what matters.
   }
-  const flat = flattenLDrawRenderables(group);
+  const flat = flattenLDrawRenderables(group, !!message.split);
   flat.userData.subpartHits = hits;
   if (message.name) {
     // Hole search (ray casts, up to ~2 s on dense parts) runs here, not on the UI thread.
@@ -118,7 +121,7 @@ scope.onmessage = (event: MessageEvent<Message>) => {
     );
     return;
   }
-  const lane = laneFor(message.base);
+  const lane = laneFor(message.base, !!message.split);
   lane.tail = lane.tail
     .then(() => load(message))
     .then(

@@ -7,6 +7,7 @@
  */
 import * as THREE from "three";
 import type { Piece } from "./editor/types";
+import { listSubparts, poseSubpart, restoreSubparts, splitSubTargetId, subPivot } from "./subparts.ts";
 import {
   sampleTrack,
   type AnimationDoc,
@@ -98,7 +99,11 @@ export function pruneGroupsAndTracks(
   const keep = animation.tracks.filter((track) =>
     track.target.kind === "group"
       ? groupIds.has(track.target.id)
-      : pieceIds.has(track.target.id),
+      : pieceIds.has(
+          track.target.kind === "sub"
+            ? splitSubTargetId(track.target.id).pieceId
+            : track.target.id,
+        ),
   );
   if (keep.length !== animation.tracks.length) {
     animation.tracks = keep;
@@ -116,6 +121,7 @@ export const captureRest = (pieces: Piece[]) =>
   );
 
 export function restoreRest(rest: Map<Piece, RestPose>) {
+  restoreSubparts();
   rest.forEach((pose, piece) => {
     piece.mesh.position.copy(pose.position);
     piece.mesh.quaternion.copy(pose.quaternion);
@@ -139,9 +145,11 @@ export function applyPose(
   const groupTracks = new Map<string, Track>(),
     pieceTracks = new Map<string, Track>(),
     groupById = new Map(groups.map((group) => [group.id, group]));
-  doc.tracks.forEach((track) =>
-    (track.target.kind === "group" ? groupTracks : pieceTracks).set(track.target.id, track),
-  );
+  const subTracks: Track[] = [];
+  doc.tracks.forEach((track) => {
+    if (track.target.kind === "sub") subTracks.push(track);
+    else (track.target.kind === "group" ? groupTracks : pieceTracks).set(track.target.id, track);
+  });
   const groupPose = new Map<string, { origin: THREE.Vector3; position: THREE.Vector3; q: THREE.Quaternion }>();
   groupTracks.forEach((track, id) => {
     const group = groupById.get(id);
@@ -182,5 +190,21 @@ export function applyPose(
       if (group) piece.mesh.position.add(new THREE.Vector3().fromArray(group.pivot));
     }
   }
+  // Sub-parts: posed inside their piece, after the piece itself has moved.
+  if (subTracks.length || hadSubs) {
+    restoreSubparts();
+    const byId = new Map(pieces.map((piece) => [String(piece.id), piece]));
+    for (const track of subTracks) {
+      const { pieceId, key } = splitSubTargetId(track.target.id),
+        piece = byId.get(pieceId);
+      if (!piece) continue;
+      const info = listSubparts(piece.mesh).find((sub) => sub.key === key);
+      if (!info) continue;
+      const pose = sampleTrack(track, t);
+      poseSubpart(piece.mesh, info, subPivot(piece.mesh, info), pose.p, pose.q);
+    }
+  }
+  hadSubs = subTracks.length > 0;
   pieces.forEach((piece) => piece.mesh.updateMatrixWorld(true));
 }
+let hadSubs = false;
