@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Ease, Keyframe } from "../animation.ts";
 
 export type TimelineRow = {
@@ -50,6 +50,8 @@ type Props = {
   onSelectKey: (selection: TimelineSelection) => void;
   onUpdateKey: (patch: Partial<Keyframe>) => void;
   onDeleteKey: () => void;
+  onDeleteKeyAt: (trackId: string, index: number) => void;
+  onEaseKeyAt: (trackId: string, index: number, ease: Ease) => void;
   onRemoveTrack: (trackId: string) => void;
   onRenameGroup: (name: string) => void;
   onPivot: (pivot: [number, number, number]) => void;
@@ -69,10 +71,27 @@ const num = (value: number) => (Math.abs(value) < 1e-9 ? 0 : +value.toFixed(4));
 export default function TimelinePanel(props: Props) {
   const { labels: L } = props,
     lanesRef = useRef<HTMLDivElement>(null),
+    [menu, setMenu] = useState<{ x: number; y: number; trackId: string; index: number } | null>(null),
     selectedRow = props.selectedKey
       ? props.rows.find((row) => row.id === props.selectedKey!.trackId)
       : undefined,
     selected = selectedRow?.keys[props.selectedKey?.index ?? -1];
+
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null),
+      onKey = (event: KeyboardEvent) => event.key === "Escape" && close();
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("blur", close);
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("blur", close);
+      window.removeEventListener("resize", close);
+    };
+  }, [menu]);
 
   const seekFromPointer = (clientX: number) => {
     const lane = lanesRef.current;
@@ -295,6 +314,17 @@ export default function TimelinePanel(props: Props) {
                         props.onSelectKey({ trackId: row.id, index });
                         props.onSeek(key.t);
                       }}
+                      onContextMenu={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        props.onSelectKey({ trackId: row.id, index });
+                        setMenu({
+                          x: Math.min(event.clientX, window.innerWidth - 190),
+                          y: Math.min(event.clientY, window.innerHeight - 170),
+                          trackId: row.id,
+                          index,
+                        });
+                      }}
                       title={`${key.t.toFixed(2)} s`}
                       aria-label={`${L.key} ${key.t.toFixed(2)} s`}
                     />
@@ -382,6 +412,41 @@ export default function TimelinePanel(props: Props) {
           )}
         </div>
       </div>
+      {menu && (
+        <div
+          className="timeline-menu"
+          role="menu"
+          style={{ left: menu.x, top: menu.y }}
+          onPointerDown={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            className="danger"
+            onClick={() => {
+              props.onDeleteKeyAt(menu.trackId, menu.index);
+              setMenu(null);
+            }}
+          >
+            ✕ {L.deleteKey}
+          </button>
+          <hr />
+          {(["linear", "easeInOut", "step"] as const).map((ease) => (
+            <button
+              type="button"
+              role="menuitem"
+              key={ease}
+              onClick={() => {
+                props.onEaseKeyAt(menu.trackId, menu.index, ease);
+                setMenu(null);
+              }}
+            >
+              {L.ease}: {ease === "linear" ? L.easeLinear : ease === "easeInOut" ? L.easeInOut : L.easeStep}
+            </button>
+          ))}
+        </div>
+      )}
     </section>
   );
 }

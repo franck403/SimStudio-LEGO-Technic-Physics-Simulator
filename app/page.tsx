@@ -11706,6 +11706,26 @@ export default function Home() {
     touchAnimation();
     if (previewActive) seekAnimation(animTimeRef.current);
   };
+  const deleteKeyAt = (trackId: string, index: number) => {
+    const s = appRef.current;
+    const track = s?.animation.tracks.find((tr) => tr.id === trackId);
+    if (!s || !track || !track.keys[index]) return;
+    s.recordHistory();
+    track.keys.splice(index, 1);
+    if (!track.keys.length) s.animation.tracks = s.animation.tracks.filter((tr) => tr !== track);
+    setSelectedKey(null);
+    touchAnimation();
+    if (previewActive) seekAnimation(animTimeRef.current);
+  };
+  const easeKeyAt = (trackId: string, index: number, ease: Keyframe["e"]) => {
+    const s = appRef.current;
+    const key = s?.animation.tracks.find((tr) => tr.id === trackId)?.keys[index];
+    if (!s || !key) return;
+    s.recordHistory();
+    key.e = ease;
+    touchAnimation();
+    if (previewActive) seekAnimation(animTimeRef.current);
+  };
   const removeTrack = (trackId: string) => {
     const s = appRef.current;
     if (!s) return;
@@ -14004,6 +14024,8 @@ export default function Home() {
           onSelectKey={setSelectedKey}
           onUpdateKey={updateKey}
           onDeleteKey={deleteKey}
+          onDeleteKeyAt={deleteKeyAt}
+          onEaseKeyAt={easeKeyAt}
           onRemoveTrack={removeTrack}
           onRenameGroup={(name) => editGroup((group) => (group.name = name.slice(0, 40)))}
           onPivot={(pivot) => editGroup((group) => (group.pivot = pivot))}
