@@ -589,6 +589,16 @@ const editorTransformPivot = (
 ) => {
   const cardan = cardanAssemblyLayout(members, state.connections);
   if (cardan) return cardan.centre.mesh.getWorldPosition(new THREE.Vector3());
+  // While animating, a group turns about its animation pivot: the gizmo and the
+  // rotate buttons use where that pivot currently is, so keys rotate about it.
+  const group = selected.groupId ? state.groups.find((g) => g.id === selected.groupId) : undefined,
+    rest = state.previewRest?.get(selected);
+  if (group && rest) {
+    const turn = selected.mesh.quaternion.clone().multiply(rest.quaternion.clone().invert());
+    return selected.mesh.position
+      .clone()
+      .sub(rest.position.clone().sub(new THREE.Vector3().fromArray(group.pivot)).applyQuaternion(turn));
+  }
   selected.mesh.updateMatrixWorld(true);
   const bounds = new THREE.Box3().setFromObject(selected.mesh);
   return bounds.isEmpty()
@@ -1341,6 +1351,7 @@ export default function Home() {
   const [posing, setPosing] = useState(false);
   const [selectedKey, setSelectedKey] = useState<TimelineSelection>(null);
   const [exportOpen, setExportOpen] = useState(false);
+  const [exportCodeText, setExportCode] = useState("");
   const [exportBusy, setExportBusy] = useState(false);
   const [exportOptions, setExportOptions] = useState({
     units: "meters" as "meters" | "studs",
@@ -11908,6 +11919,32 @@ export default function Home() {
     link.click();
     window.setTimeout(() => URL.revokeObjectURL(url), 4000);
   };
+  const exportCodeRaw = async () => {
+    const s = appRef.current;
+    if (!s || exportBusy) return;
+    if (!s.animation.tracks.some((track) => track.keys.length)) {
+      setMessage(t.exportCodeNone);
+      return;
+    }
+    setExportBusy(true);
+    try {
+      const mod = await import("./export-gltf");
+      const base = (projectNameRef.current || "model").replace(/[^\w.-]+/g, "_"),
+        code = await s.runAtRest(() =>
+          mod.exportAnimationCode(
+            { pieces: s.pieces, groups: s.groups, animation: s.animation },
+            `${base}.glb`,
+          ),
+        );
+      downloadText("animation.js", code, "text/javascript");
+      setExportCode(code);
+      setMessage(`${t.exportCodeDone}: animation.js`);
+    } catch (error) {
+      setMessage(`${t.exportFailed}: ${error instanceof Error ? error.message : error}`);
+    } finally {
+      setExportBusy(false);
+    }
+  };
   const runFixerRaw = async () => {
     const s = appRef.current;
     if (!s || fixerBusy || running) return;
@@ -12023,6 +12060,7 @@ export default function Home() {
   const runFixer = blocking(t.fixerRunning, () => runFixerRaw());
   const replaceParts = blocking(t.fixerRunning, () => replacePartsRaw());
   const exportGlb = blocking(t.busyExport, () => exportGlbRaw());
+  const exportCode = blocking(t.busyExport, () => exportCodeRaw());
   const performOpenSavedProject = blocking(t.busyProject, (id: string) => performOpenSavedProjectRaw(id));
 
   const exportVideoFile = async () => {
@@ -14420,6 +14458,11 @@ export default function Home() {
               <button type="button" className="primary settings-reload" disabled={exportBusy} onClick={() => void exportGlb()}>
                 {exportBusy ? "…" : t.exportDownload}
               </button>
+              <p className="settings-help">{t.exportCodeHelp}</p>
+              <button type="button" disabled={exportBusy} onClick={() => void exportCode()}>
+                {t.exportCode}
+              </button>
+              {exportCodeText && <pre className="export-snippet">{exportCodeText.split("\n").slice(0, 22).join("\n")}</pre>}
               {exportInfo && (
                 <>
                   <p className="settings-help">

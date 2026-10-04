@@ -15,7 +15,8 @@ import * as THREE from "three";
 import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
 import { mergeGeometries, mergeVertices } from "three/addons/utils/BufferGeometryUtils.js";
 import type { Piece } from "./editor/types";
-import { buildNodeTracks, type AnimationDoc, type GroupDef } from "./animation.ts";
+import { buildNodeTracks, type AnimationDoc, type GroupDef, type Track } from "./animation.ts";
+import { animationModule } from "./export-code.ts";
 
 export type ExportOptions = {
   /** "studs": 1 unit = 1 stud. "meters": real size (1 stud = 8 mm). */
@@ -297,6 +298,7 @@ export function buildExportScene(input: ExportInput, options: ExportOptions) {
   input.extras?.forEach((extra) => root.add(extra));
 
   const clips: THREE.AnimationClip[] = [];
+  const trackNodes: { node: string; kind: "group" | "piece"; label: string; keys: Track["keys"] }[] = [];
   let trackCount = 0;
   if (options.animation) {
     const tracks: THREE.KeyframeTrack[] = [];
@@ -311,6 +313,12 @@ export function buildExportScene(input: ExportInput, options: ExportOptions) {
         track.target.kind === "piece",
       );
       tracks.push(built.position, built.quaternion);
+      trackNodes.push({
+        node: node.name,
+        kind: track.target.kind,
+        label: String(node.userData?.simStudio?.name ?? node.name),
+        keys: track.keys,
+      });
       trackCount++;
     });
     if (tracks.length) {
@@ -339,6 +347,7 @@ export function buildExportScene(input: ExportInput, options: ExportOptions) {
     root,
     clips,
     groupNames,
+    trackNodes,
     stats: {
       parts,
       groups: groupNodes.size,
@@ -426,4 +435,16 @@ addEventListener("resize", () => { camera.aspect = innerWidth / innerHeight; cam
 renderer.setAnimationLoop(() => { mixer.update(clock.getDelta()); controls.update(); renderer.render(scene, camera); });
 </script></body></html>
 `;
+}
+
+/** The timeline as a stand-alone Three.js module (see export-code.ts). */
+export function exportAnimationCode(input: ExportInput, file: string) {
+  const { trackNodes } = buildExportScene(input, { units: "studs", animation: true, outlines: false });
+  return animationModule({
+    duration: input.animation.duration,
+    loop: input.animation.loop,
+    fps: input.animation.fps,
+    tracks: trackNodes,
+    file,
+  });
 }
