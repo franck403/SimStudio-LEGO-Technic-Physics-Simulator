@@ -11,6 +11,8 @@ import { LDrawLoader, clearLDrawCaches } from "../vendor/LDrawLoader.js";
 import { LDrawConditionalLineMaterial } from "three/addons/materials/LDrawConditionalLineMaterial.js";
 import { flattenLDrawRenderables } from "../ldraw-geometry";
 import { classifySubpart } from "../ldraw-subparts";
+import { generatePartConnectors } from "../connectors";
+import * as connectorsModule from "../connectors";
 
 type Init = {
   type: "init";
@@ -18,7 +20,7 @@ type Init = {
   libraries: string[];
   configUrl?: string;
 };
-type Load = { type: "load"; id: number; base: string; source: string };
+type Load = { type: "load"; id: number; base: string; source: string; name?: string };
 type Reset = { type: "reset" };
 type Message = Init | Load | Reset;
 
@@ -72,6 +74,31 @@ async function load(message: Load) {
   }
   const flat = flattenLDrawRenderables(group);
   flat.userData.subpartHits = hits;
+  if (message.name) {
+    // Hole search (ray casts, up to ~2 s on dense parts) runs here, not on the UI thread.
+    try {
+      const wrapper = new THREE.Group(),
+        model = flat.clone(true);
+      model.rotation.x = Math.PI;
+      model.scale.setScalar(0.05);
+      wrapper.add(model);
+      wrapper.updateMatrixWorld(true);
+      const list = generatePartConnectors(wrapper, message.name);
+      flat.userData.workerConnectors = {
+        expired: connectorsModule.lastDetectionExpired,
+        list: list.map((c) => ({
+          local: c.local.toArray(),
+          axis: c.axis.toArray(),
+          kind: c.kind,
+          role: c.role,
+          diameter: c.diameter,
+          length: c.length,
+        })),
+      };
+    } catch {
+      // The main thread falls back to its own detection.
+    }
+  }
   return { json: flat.toJSON(), missing };
 }
 

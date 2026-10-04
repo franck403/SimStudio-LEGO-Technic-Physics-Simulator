@@ -3,7 +3,7 @@
 export type Language = "en";
 
 const enTranslations = {
-  subtitle: "PHYSICS BUILD LAB",
+  subtitle: "LEGO BUILDER & ANIMATOR",
   light: "Light",
   dark: "Dark",
   switchTheme: "Switch theme",

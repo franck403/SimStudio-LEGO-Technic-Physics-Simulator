@@ -2210,15 +2210,15 @@ export default function Home() {
     const moveToWorker = (pool: ReturnType<typeof makeLoaderPool>, base: string) => {
       const mainThreadLoad = pool.load.bind(pool),
         mainThreadReset = pool.reset.bind(pool);
-      pool.load = async (source: string, label: string) => {
+      pool.load = (async (source: string, label: string, partName?: string) => {
         if (ldrawWorkers.available)
           try {
-            return (await ldrawWorkers.load(base, source, label)) as THREE.Group;
+            return (await ldrawWorkers.load(base, source, label, partName)) as THREE.Group;
           } catch (error) {
             if (!(error instanceof WorkerUnavailable)) throw error;
           }
         return mainThreadLoad(source, label);
-      };
+      }) as typeof pool.load;
       pool.reset = () => {
         mainThreadReset();
         ldrawWorkers.reset();
@@ -2352,7 +2352,9 @@ export default function Home() {
             for (const [pool, base, kind] of ordered.length ? ordered : sources) {
               try {
                 const loaded = flattenLDrawRenderables(
-                  await pool.load(source, `La pieza ${p.part}`),
+                  await (
+                    pool.load as (s: string, l: string, n?: string) => Promise<THREE.Group>
+                  )(source, `La pieza ${p.part}`, p.name),
                 );
                 if (!hasRenderableMesh(loaded)) throw new Error(`${file}.dat is empty`);
                 const missing = Number(loaded.userData.missingSubfiles ?? 0);
@@ -2581,7 +2583,26 @@ export default function Home() {
           connectorCache.get(correctionStorageKey) &&
           cloneConnectors(connectorCache.get(correctionStorageKey)!);
       if (!connectors) {
-        connectors = generatePartConnectors(wrapper, p.name);
+        const prepared = wrapper.children[0]?.userData.workerConnectors as
+          | {
+              expired: boolean;
+              list: {
+                local: number[];
+                axis: number[];
+                kind: MeshConnector["kind"];
+                role: MeshConnector["role"];
+                diameter: number;
+                length?: number;
+              }[];
+            }
+          | undefined;
+        connectors = prepared
+          ? prepared.list.map((c) => ({
+              ...c,
+              local: new THREE.Vector3().fromArray(c.local),
+              axis: new THREE.Vector3().fromArray(c.axis),
+            }))
+          : generatePartConnectors(wrapper, p.name);
         // Hole primitives read straight from the LDraw files fill in what the
         // mesh search missed (dense parts such as the Spike motors).
         const subpartHits = (wrapper.children[0]?.userData.subpartHits ?? []) as SubpartHit[];
@@ -2603,7 +2624,7 @@ export default function Home() {
         // A search that ran out of time, or a model with missing sub-files, is
         // incomplete: keep it for this session only so a later load can redo it.
         const incomplete =
-          lastDetectionExpired || Number(wrapper.children[0]?.userData.missingSubfiles ?? 0) > 0;
+          (prepared ? prepared.expired : lastDetectionExpired) || Number(wrapper.children[0]?.userData.missingSubfiles ?? 0) > 0;
         if (!incomplete)
         try {
           localStorage.setItem(
