@@ -44,7 +44,7 @@ export function createLDrawWorkerPool(options: {
     });
   };
 
-  const start = () => {
+  const start = (fileMap: Record<string, string> | null) => {
     if (broken || workers.length) return;
     try {
       for (let i = 0; i < options.size; i++) {
@@ -77,14 +77,14 @@ export function createLDrawWorkerPool(options: {
           fail(worker, new WorkerUnavailable(event.message));
         };
         workers.push(worker);
-        void options.fileMap.then((fileMap) =>
-          worker.postMessage({
-            type: "init",
-            fileMap,
-            libraries: options.libraries,
-            configUrl: options.configUrl,
-          }),
-        );
+        // Posted before any "load" so the worker always knows the file map,
+        // library list and colour config before it parses its first part.
+        worker.postMessage({
+          type: "init",
+          fileMap,
+          libraries: options.libraries,
+          configUrl: options.configUrl,
+        });
       }
     } catch (error) {
       broken = true;
@@ -101,8 +101,8 @@ export function createLDrawWorkerPool(options: {
       workers.forEach((worker) => worker.postMessage({ type: "reset" }));
     },
     async load(base: string, source: string, label: string) {
-      await options.fileMap;
-      start();
+      const fileMap = await options.fileMap;
+      start(fileMap);
       if (broken || !workers.length) throw new WorkerUnavailable();
       const id = nextId++,
         // A given library always goes to the same worker lane order, but spread
