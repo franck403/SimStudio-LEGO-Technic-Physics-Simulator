@@ -5219,13 +5219,14 @@ export default function Home() {
       return true;
     };
     const runAtRest = async <T,>(task: () => Promise<T> | T): Promise<T> => {
-      const previewing = state.previewRest ? state.previewTime : null;
+      const current = state.previewRest ? captureRest(state.pieces) : null;
       if (state.previewRest) restoreRest(state.previewRest);
       try {
         return await task();
       } finally {
-        if (previewing !== null && state.previewRest)
-          applyPose(state.pieces, state.previewRest, state.groups, state.animation, previewing);
+        if (current) restoreRest(current);
+        state.renderBatchesDirty = true;
+        state.requestRender();
       }
     };
 
@@ -7608,13 +7609,13 @@ export default function Home() {
       name?: string;
       createdAt?: string;
     }) => {
-      const previewing = state.previewRest ? state.previewTime : null;
+      const current = state.previewRest ? captureRest(state.pieces) : null;
       if (state.previewRest) restoreRest(state.previewRest);
       try {
         return createProjectDocumentAtRest(identity);
       } finally {
-        if (previewing !== null && state.previewRest)
-          applyPose(state.pieces, state.previewRest, state.groups, state.animation, previewing);
+        // Put the pieces back exactly as they were (including moves not keyed yet).
+        if (current) restoreRest(current);
       }
     };
 
@@ -11608,18 +11609,45 @@ export default function Home() {
     }
     return track;
   };
-  const addKeyAtTime = () => {
+  // Records where the selected group/part is RIGHT NOW as a key at the current
+  // time: move it with the gizmo, then press Add key.
+  const captureKey = () => {
     const s = appRef.current,
-      target = animationTarget();
-    if (!s || !target) return;
+      target = animationTarget(),
+      anchor = s?.selected;
+    if (!s || !target || !anchor) return;
+    if (!s.previewRest) s.setPreviewTime(animTimeRef.current);
+    const rest = s.previewRest!.get(anchor);
+    if (!rest) return;
     s.recordHistory();
+    const rotation = anchor.mesh.quaternion.clone().multiply(rest.quaternion.clone().invert());
+    let offset: THREE.Vector3;
+    if (target.kind === "group") {
+      const group = s.groups.find((g) => g.id === target.id)!,
+        pivot = new THREE.Vector3().fromArray(group.pivot);
+      offset = anchor.mesh.position
+        .clone()
+        .sub(rest.position.clone().sub(pivot).applyQuaternion(rotation).add(pivot));
+    } else offset = anchor.mesh.position.clone().sub(rest.position);
     const track = ensureTrack(target),
-      key = keyAt(track.keys.length ? track : undefined, animTimeRef.current);
+      time = animTimeRef.current;
+    // First key after t=0: anchor the start at the rest pose so it really animates.
+    if (!track.keys.length && time > 0.001)
+      upsertKey(track, { t: 0, p: [0, 0, 0], r: [0, 0, 0], e: "easeInOut" });
+    const key: Keyframe = {
+      t: time,
+      p: [offset.x, offset.y, offset.z],
+      r: toRotationVector(rotation),
+      e: "easeInOut",
+    };
     upsertKey(track, key);
-    setSelectedKey({ trackId: track.id, index: track.keys.indexOf(track.keys.find((k) => Math.abs(k.t - key.t) < 1e-3)!) });
+    setSelectedKey({ trackId: track.id, index: track.keys.findIndex((k) => Math.abs(k.t - time) < 1e-3) });
+    setPosing(false);
+    setPreviewActive(true);
     touchAnimation();
-    seekAnimation(animTimeRef.current);
+    s.setPreviewTime(time);
   };
+  const addKeyAtTime = captureKey;
   const spinTarget = (axis: "x" | "y" | "z", turns: number) => {
     const s = appRef.current,
       target = animationTarget();
@@ -11644,40 +11672,12 @@ export default function Home() {
   const beginPose = () => {
     const s = appRef.current;
     if (!s || !animationTarget()) return;
-    s.recordHistory();
     s.setPreviewTime(animTimeRef.current);
-    setPreviewActive(true);
     setAnimPlaying(false);
+    setPreviewActive(true);
     setPosing(true);
   };
-  const capturePose = () => {
-    const s = appRef.current,
-      target = animationTarget(),
-      anchor = s?.selected;
-    if (!s || !target || !anchor || !s.previewRest) return;
-    const rest = s.previewRest.get(anchor);
-    if (!rest) return;
-    let offset: THREE.Vector3, rotation: THREE.Quaternion;
-    rotation = anchor.mesh.quaternion.clone().multiply(rest.quaternion.clone().invert());
-    if (target.kind === "group") {
-      const group = s.groups.find((g) => g.id === target.id)!,
-        pivot = new THREE.Vector3().fromArray(group.pivot);
-      offset = anchor.mesh.position
-        .clone()
-        .sub(rest.position.clone().sub(pivot).applyQuaternion(rotation).add(pivot));
-    } else offset = anchor.mesh.position.clone().sub(rest.position);
-    const track = ensureTrack(target),
-      key: Keyframe = {
-        t: animTimeRef.current,
-        p: [offset.x, offset.y, offset.z],
-        r: toRotationVector(rotation),
-        e: "easeInOut",
-      };
-    upsertKey(track, key);
-    setPosing(false);
-    touchAnimation();
-    seekAnimation(animTimeRef.current);
-  };
+  const capturePose = captureKey;
   const cancelPose = () => {
     setPosing(false);
     seekAnimation(animTimeRef.current);
@@ -13840,6 +13840,7 @@ export default function Home() {
                 setAnimPlaying(false);
               }
               setTimelineOpen(!timelineOpen);
+              if (!timelineOpen) window.setTimeout(() => seekAnimation(animTimeRef.current), 0);
             }}
           >
             ▶ {t.animate}
