@@ -48,6 +48,8 @@ import {
 import TimelinePanel, { type TimelineSelection } from "./components/TimelinePanel";
 import { mergeSubpartConnectors, subpartConnectors, type SubpartHit } from "./ldraw-subparts";
 import { listSubparts, splitSubTargetId, subTargetId } from "./subparts";
+import { prepareStlGeometry, type StlSettings } from "./stl-import";
+import StlImportDialog from "./components/StlImportDialog";
 import { extractStudioLDraw } from "./studio-io";
 import {
   approximateCollisionPrimitives,
@@ -604,6 +606,8 @@ const editorTransformPivot = (
       .sub(rest.position.clone().sub(new THREE.Vector3().fromArray(group.pivot)).applyQuaternion(turn));
   }
   selected.mesh.updateMatrixWorld(true);
+  if (selected.rotationPivotLocal && members.length <= 1)
+    return selected.mesh.localToWorld(selected.rotationPivotLocal.clone());
   const bounds = new THREE.Box3().setFromObject(selected.mesh);
   return bounds.isEmpty()
     ? selected.mesh.getWorldPosition(new THREE.Vector3())
@@ -1383,6 +1387,7 @@ export default function Home() {
   const [posing, setPosing] = useState(false);
   const [selectedKey, setSelectedKey] = useState<TimelineSelection>(null);
   // Sub-part of the selected piece being animated on its own (null = piece/group).
+  const [stlPending, setStlPending] = useState<File[] | null>(null);
   const [subTarget, setSubTarget] = useState<string | null>(null);
   useEffect(() => setSubTarget(null), [selectedId]);
   const [exportOpen, setExportOpen] = useState(false);
@@ -12209,7 +12214,12 @@ export default function Home() {
     performImportProjectRaw(document),
   );
   const importProjectFile = blocking(t.busyProject, (file: File) => importProjectFileRaw(file));
-  const importStl = blocking(t.stlLoading, (files: File[]) => importStlRaw(files));
+  const importStl = (files: File[]) => setStlPending(files);
+  const confirmStl = blocking(t.stlLoading, async (stlSettings: StlSettings) => {
+    const files = stlPending;
+    setStlPending(null);
+    if (files?.length) await importStlRaw(files, stlSettings);
+  });
   const forceReloadModels = blocking(t.forceReloading, (all: boolean) => forceReloadModelsRaw(all));
   const runFixer = blocking(t.fixerRunning, () => runFixerRaw());
   const replaceParts = blocking(t.fixerRunning, () => replacePartsRaw());
@@ -12590,7 +12600,7 @@ export default function Home() {
 
   // STL meshes become ordinary pieces: millimetres -> studs (8 mm), Z-up -> Y-up,
   // centred, with the triangle data stored inside the project like any part.
-  const importStlRaw = async (files: File[]) => {
+  const importStlRaw = async (files: File[], stlSettings: StlSettings) => {
     const s = appRef.current;
     if (!s || running) return;
     setMessage(t.stlLoading);
@@ -12599,17 +12609,12 @@ export default function Home() {
     const target = s.cameraTarget;
     for (const file of files) {
       try {
-        const geometry = new STLLoader().parse(await file.arrayBuffer());
-        geometry.rotateX(-Math.PI / 2);
-        geometry.scale(1 / 8, 1 / 8, 1 / 8);
-        geometry.computeBoundingBox();
-        const box = geometry.boundingBox!,
-          centre = box.getCenter(new THREE.Vector3());
-        geometry.translate(-centre.x, -box.min.y, -centre.z);
-        if (!geometry.getAttribute("normal")) geometry.computeVertexNormals();
+        // Origin, units, axis and rotation come from the import dialog.
+        const geometry = prepareStlGeometry(new STLLoader().parse(await file.arrayBuffer()), stlSettings),
+          lift = Math.max(0, -(geometry.boundingBox?.min.y ?? 0));
         const mesh = new THREE.Mesh(
             geometry,
-            new THREE.MeshStandardMaterial({ color: 0x9ba0a8, roughness: 0.6, flatShading: true }),
+            new THREE.MeshStandardMaterial({ color: new THREE.Color(stlSettings.color), roughness: 0.6, flatShading: true }),
           ),
           model = new THREE.Group();
         model.add(mesh);
@@ -12626,9 +12631,11 @@ export default function Home() {
               embeddedGeometry: model.toJSON() as unknown as JsonObject,
               projectAssetKey: part,
             },
-            new THREE.Vector3(Math.round(target.x) + added * 2, 0, Math.round(target.z)),
+            new THREE.Vector3(Math.round(target.x) + added * 2, lift, Math.round(target.z)),
           );
         if (piece) {
+          // The chosen origin is also where the part rotates.
+          piece.rotationPivotLocal = new THREE.Vector3(0, 0, 0);
           added++;
           s.selected = piece;
           s.selectedPieces = new Set([piece]);
@@ -14652,6 +14659,14 @@ export default function Home() {
             </div>
           </section>
         </div>
+      )}
+      {stlPending && (
+        <StlImportDialog
+          files={stlPending}
+          labels={t as unknown as Record<string, string>}
+          onCancel={() => setStlPending(null)}
+          onImport={(stlSettings) => void confirmStl(stlSettings)}
+        />
       )}
       {fixerOpen && (
         <div
