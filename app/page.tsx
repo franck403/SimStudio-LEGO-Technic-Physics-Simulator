@@ -1243,6 +1243,7 @@ export default function Home() {
 
   // Hidden file inputs used by the import and map editors.
   const fileRef = useRef<HTMLInputElement>(null);
+  const stlFileRef = useRef<HTMLInputElement>(null);
   const projectFileRef = useRef<HTMLInputElement>(null);
   const connectorFileRef = useRef<HTMLInputElement>(null);
   const colliderFileRef = useRef<HTMLInputElement>(null);
@@ -14212,6 +14213,18 @@ export default function Home() {
             }}
           />
           <input
+            ref={stlFileRef}
+            type="file"
+            hidden
+            multiple
+            accept=".stl,model/stl"
+            onChange={(e) => {
+              const files = [...(e.target.files ?? [])];
+              e.currentTarget.value = "";
+              if (files.length) void importStl(files);
+            }}
+          />
+          <input
             ref={projectFileRef}
             type="file"
             hidden
@@ -14241,6 +14254,14 @@ export default function Home() {
             title="Redo · Ctrl+Y"
           >
             ↷
+          </button>
+          <button
+            className="ghost"
+            disabled={running}
+            onClick={() => stlFileRef.current?.click()}
+            title={t.stlButtonHelp}
+          >
+            ⬡ STL
           </button>
           <button
             className="ghost"
@@ -14315,6 +14336,7 @@ export default function Home() {
                     [
                       [`▣ ${t.projectsButton}`, () => setProjectMenuOpen(true), false],
                       [t.import, () => fileRef.current?.click(), false],
+                      [`⬡ ${t.stlTitle}`, () => stlFileRef.current?.click(), running],
                       [`${t.export} (LDraw)`, exportModel, false],
                       [
                         "⬇ GLB · Three.js",
@@ -14665,6 +14687,7 @@ export default function Home() {
           files={stlPending}
           labels={t as unknown as Record<string, string>}
           onCancel={() => setStlPending(null)}
+          onPickFiles={(files) => setStlPending(files)}
           onImport={(stlSettings) => void confirmStl(stlSettings)}
         />
       )}
@@ -15409,6 +15432,15 @@ export default function Home() {
             <button onClick={() => void addReference()}>+</button>
           </div>
         </div>
+        <button
+          type="button"
+          className="stl-palette-button"
+          disabled={running}
+          onClick={() => stlFileRef.current?.click()}
+          title={t.stlButtonHelp}
+        >
+          ⬡ {t.stlTitle}…
+        </button>
         <div className="catalog-head">
           <b>
             {idResults

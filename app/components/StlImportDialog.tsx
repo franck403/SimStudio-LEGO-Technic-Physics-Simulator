@@ -16,6 +16,8 @@ type Props = {
   labels: Record<string, string>;
   onCancel: () => void;
   onImport: (settings: StlSettings) => void;
+  /** Replaces the files shown in the dialog. */
+  onPickFiles: (files: File[]) => void;
 };
 
 const ORIGINS: StlOrigin[] = ["bottom", "center", "top", "mass", "file"];
@@ -26,7 +28,8 @@ const UNITS: StlUnit[] = ["mm", "cm", "in", "stud", "fit"];
  * and the controls that decide where the part's origin (its "moving place": the
  * point it rotates and animates about) sits.
  */
-export default function StlImportDialog({ files, labels: L, onCancel, onImport }: Props) {
+export default function StlImportDialog({ files, labels: L, onCancel, onImport, onPickFiles }: Props) {
+  const picker = useRef<HTMLInputElement>(null);
   const [settings, setSettings] = useState<StlSettings>(defaultStlSettings);
   const [current, setCurrent] = useState(0);
   const [sources, setSources] = useState<(THREE.BufferGeometry | null)[]>([]);
@@ -219,6 +222,31 @@ export default function StlImportDialog({ files, labels: L, onCancel, onImport }
           </button>
         </div>
         <div className="settings-body stl-body">
+          <div className="settings-row">
+            <span title={files.map((file) => file.name).join(", ")}>
+              {files.length === 1 ? files[0].name : `${files.length} ${L.stlFiles}`}
+            </span>
+            <button type="button" onClick={() => picker.current?.click()}>
+              {L.stlChoose}
+            </button>
+            <input
+              ref={picker}
+              type="file"
+              hidden
+              multiple
+              accept=".stl,model/stl"
+              onChange={(event) => {
+                const picked = [...(event.target.files ?? [])];
+                event.currentTarget.value = "";
+                if (picked.length) {
+                  setCurrent(0);
+                  setSources([]);
+                  setError("");
+                  onPickFiles(picked);
+                }
+              }}
+            />
+          </div>
           <div className="stl-preview" ref={host} />
           <p className="settings-help">
             {stats

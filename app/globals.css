@@ -3624,3 +3624,5 @@ body.resizing-inspector * {
 .stl-dialog input[type=number],.stl-dialog select{padding:6px 8px;border:1px solid rgba(128,128,128,.4);border-radius:8px;background:transparent;color:inherit;font:inherit}
 .stl-dialog .stl-turn button{width:28px;height:28px;border:1px solid rgba(128,128,128,.4);border-radius:8px;background:transparent;color:inherit;cursor:pointer}
 .stl-dialog input[type=color]{width:48px;height:30px;border:0;padding:0;background:none}
+.stl-palette-button{width:100%;margin:8px 0;padding:10px;border:1px dashed rgba(128,128,128,.6);border-radius:10px;background:transparent;color:inherit;font-weight:600;cursor:pointer}
+.stl-palette-button:hover:not(:disabled){background:rgba(31,111,235,.12);border-color:#1f6feb}
