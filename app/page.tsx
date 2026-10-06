@@ -47,6 +47,14 @@ import {
 } from "./model-fixer";
 import TimelinePanel, { type TimelineSelection } from "./components/TimelinePanel";
 import { mergeSubpartConnectors, subpartConnectors, type SubpartHit } from "./ldraw-subparts";
+import {
+  decodeProjectAsync,
+  encodeProjectAsync,
+  loadProjectAsync,
+  loadRecoveryAsync,
+  saveProjectAsync,
+  saveRecoveryAsync,
+} from "./project-worker-client";
 import { listSubparts, splitSubTargetId, subTargetId } from "./subparts";
 import { prepareStlGeometry, type StlSettings } from "./stl-import";
 import StlImportDialog from "./components/StlImportDialog";
@@ -101,15 +109,9 @@ import preloadedCatalog from "./preloaded-catalog.json";
 import {
   PROJECT_EXTENSION,
   PROJECT_MIME,
-  decodeProjectFile,
   deleteBrowserProject,
-  encodeProjectFile,
   listBrowserProjects,
-  loadBrowserProject,
-  loadRecoveryProject,
   safeProjectFileName,
-  saveBrowserProject,
-  saveRecoveryProject,
   type JsonObject,
   type ProjectSummary,
   type SavedCollisionPrimitive,
@@ -463,8 +465,16 @@ const categories = [
   { id: "gears", icon: "⚙" },
   { id: "wheels", icon: "◉" },
   { id: "specials", icon: "✦" },
+  { id: "motors", icon: "⚡" },
   { id: "imported", icon: "↓" },
 ] as const;
+
+// Motors are listed but never preloaded (their LDraw files are the heaviest).
+// Candidates beyond the built-in SPIKE motors are checked against the LDraw
+// library the first time the tab opens; only real motors are shown.
+const MOTOR_CANDIDATES = [
+  "45303", "88003", "58121", "99499", "95658", "99455", "53787", "53792", "99010", "99012", "47154",
+];
 
 // --- Catalog classification and physics defaults ---------------------------
 
@@ -546,6 +556,19 @@ const fetchLDrawFileInfo = async (
     } catch {}
   }
 };
+
+const motorEntry = (item: { part: string; name: string }): CatalogPart => ({
+  part: item.part,
+  name: item.name,
+  kind: "motor",
+  color: 71,
+  origin: "catalog-search",
+  sourceKind: "ldraw-network",
+  requestedPart: item.part,
+  catalogReturnedPart: item.part,
+  resolvedPart: item.part,
+  catalogQuery: item.part,
+});
 
 const lookupLDrawParts = async (id: string) => {
   const files = await Promise.all(
@@ -1284,6 +1307,8 @@ export default function Home() {
   const [search, setSearch] = useState("");
   const [reference, setReference] = useState("");
   const [results, setResults] = useState<CatalogPart[]>([]);
+  const [motorExtras, setMotorExtras] = useState<CatalogPart[]>([]);
+  const motorProbeRef = useRef(false);
   const [imported, setImported] = useState<CatalogPart[]>([]);
   // Exact "find part by ID" result. null = normal palette/search view.
   const [idQuery, setIdQuery] = useState("");
@@ -1915,7 +1940,12 @@ export default function Home() {
       setResults(
         category === "imported"
           ? imported
-          : paletteParts.filter((p) => p.family === category),
+          : category === "motors"
+            ? [
+                ...paletteParts.filter((p) => p.family === "spike" && /motor|hub|sensor/i.test(p.name)),
+                ...motorExtras,
+              ]
+            : paletteParts.filter((p) => p.family === category),
       );
       return undefined;
     }
@@ -1981,11 +2011,66 @@ export default function Home() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [category, search, imported]);
+  }, [category, search, imported, motorExtras]);
 
   useEffect(() => {
+    // The motor list is shown without preloading anything.
+    if (category === "motors" && !search.trim()) return;
     results.slice(0, 4).forEach((p) => void appRef.current?.preloadPart(p));
-  }, [results]);
+  }, [results, category, search]);
+
+  // Typing an exact part number starts loading that model in the background
+  // right away, so it is ready by the time it is dragged onto the table.
+  useEffect(() => {
+    const query = search.trim().toLowerCase().replace(/\.dat$/, "");
+    if (!/^[0-9][0-9a-z]{2,}$/.test(query)) return undefined;
+    const timer = window.setTimeout(() => {
+      const alias = resolvePaletteRequest(query);
+      for (const part of [...paletteParts, ...imported])
+        if (
+          [part.part, part.modelPart, part.resolvedPart, part.requestedPart].some((id) => {
+            const value = id?.toLowerCase();
+            return value === query || value === alias;
+          })
+        )
+          void appRef.current?.preloadPart(part);
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [search, imported]);
+
+  // First visit of the Motors tab: find which extra motors the library has.
+  useEffect(() => {
+    if (category !== "motors" || motorProbeRef.current) return;
+    motorProbeRef.current = true;
+    let cancelled = false;
+    (async () => {
+      try {
+        const cached = JSON.parse(localStorage.getItem("brickreel:motor-list") ?? "null") as
+          | { part: string; name: string }[]
+          | null;
+        if (cached) {
+          setMotorExtras(cached.map(motorEntry));
+          return;
+        }
+      } catch {}
+      const known = new Set(paletteParts.map((p) => p.part.toLowerCase())),
+        found: { part: string; name: string }[] = [];
+      for (const id of MOTOR_CANDIDATES.filter((id) => !known.has(id))) {
+        if (cancelled) return;
+        const info = await fetchLDrawFileInfo(id).catch(() => undefined);
+        if (info && /motor/i.test(info.name)) {
+          found.push(info);
+          setMotorExtras(found.map(motorEntry));
+        }
+      }
+      try {
+        localStorage.setItem("brickreel:motor-list", JSON.stringify(found));
+      } catch {}
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [category]);
 
   useEffect(() => {
     const host = mountRef.current;
@@ -7769,7 +7854,7 @@ export default function Home() {
       recoveryTimer = window.setTimeout(
         () => {
           if (generation !== recoveryGeneration || restoringProject) return;
-          void saveRecoveryProject(createProjectDocument())
+          void saveRecoveryAsync(createProjectDocument())
             .then(() => setRecoveryStatus("saved"))
             .catch(() => setRecoveryStatus("idle"));
         },
@@ -8200,7 +8285,7 @@ export default function Home() {
       if (document.visibilityState === "hidden") scheduleRecoverySave(true);
     };
     document.addEventListener("visibilitychange", flushRecovery);
-    void Promise.all([listBrowserProjects(), loadRecoveryProject()])
+    void Promise.all([listBrowserProjects(), loadRecoveryAsync()])
       .then(async ([savedProjects, recovery]) => {
         setProjects(savedProjects);
         if (recovery) {
@@ -9350,7 +9435,7 @@ export default function Home() {
           ...(state.selectedPieces.size ? state.selectedPieces : new Set([piece])),
         ],
         code = e.code;
-      if (code === "Delete") {
+      if (code === "Delete" || code === "Backspace") {
         e.preventDefault();
         state.recordHistory();
         const selectedSet = new Set(selectedPieces);
@@ -10477,8 +10562,8 @@ export default function Home() {
     e.dataTransfer.effectAllowed = "copy";
   };
 
-  const addReference = async () => {
-    const part = reference.trim().replace(/\.dat$/i, "");
+  const addReference = async (queryArg?: string) => {
+    const part = (queryArg ?? reference).trim().replace(/\.dat$/i, "");
     if (!part) return;
     setCatalogBusy(true);
     const normalizedPart = part.toLowerCase(),
@@ -10562,9 +10647,9 @@ export default function Home() {
 
   // Lookup by part number: shows ONLY the parts of that number (never a
   // category), including every LDraw file variant (a/b/c, c01, ...).
-  const lookupById = async () => {
-    const part = idQuery.trim().replace(/\.dat$/i, "");
-    if (!part) return;
+  const lookupById = async (queryArg?: string): Promise<number> => {
+    const part = (queryArg ?? idQuery).trim().replace(/\.dat$/i, "");
+    if (!part) return 0;
     setCatalogBusy(true);
     const normalizedPart = part.toLowerCase(),
       palettePart = resolvePaletteRequest(normalizedPart),
@@ -10630,14 +10715,10 @@ export default function Home() {
               catalogQuery: part,
             });
     setCatalogBusy(false);
-    setSearch("");
     const exactRank = (candidate: CatalogPart) =>
         [normalizedPart, palettePart].includes(candidate.part.toLowerCase()) ? 0 : 1,
       list = found.sort((a, b) => exactRank(a) - exactRank(b));
-    if (!list.length) {
-      setIdResults([]);
-      return;
-    }
+    if (!list.length) return 0;
     const extra = list.filter((candidate) => !belongsToDefaultPalette(candidate));
     if (extra.length)
       setImported((old) => [
@@ -10646,6 +10727,20 @@ export default function Home() {
       ]);
     setIdResults(list);
     list.slice(0, 6).forEach((candidate) => void appRef.current?.preloadPart(candidate));
+    return list.length;
+  };
+
+  // One search box: typing filters the palette (names and part numbers, any
+  // category); Enter does the deep lookup in the LDraw libraries (every variant
+  // of that number) and, when nothing matches, adds the number as an external part.
+  const runSearch = async () => {
+    const query = search.trim();
+    if (!query) return;
+    const found = await lookupById(query);
+    if (!found) {
+      await addReference(query);
+      if (!appRef.current) return;
+    }
   };
 
   const rotate = (axis: "x" | "y" | "z", dir = 1) => {
@@ -12314,9 +12409,9 @@ export default function Home() {
     } catch {}
   };
 
-  const downloadProjectDocument = (document: SimStudioProjectDocument) => {
+  const downloadProjectDocument = async (document: SimStudioProjectDocument) => {
     const url = URL.createObjectURL(
-        new Blob([encodeProjectFile(document)], { type: PROJECT_MIME }),
+        new Blob([(await encodeProjectAsync(document)) as BlobPart], { type: PROJECT_MIME }),
       ),
       anchor = window.document.createElement("a");
     anchor.href = url;
@@ -12336,8 +12431,8 @@ export default function Home() {
       projectNameRef.current = projectName.trim() || "Untitled animation";
       savedProjectRevisionRef.current = projectRevisionRef.current;
       const document = state.createProjectDocument();
-      await saveBrowserProject(document);
-      await saveRecoveryProject(document);
+      await saveProjectAsync(document);
+      await saveRecoveryAsync(document);
       await refreshProjectList();
       setRecoveryStatus("saved");
       setCurrentProjectSaved(true);
@@ -12490,7 +12585,7 @@ export default function Home() {
     if (!state || running || projectBusy) return;
     setProjectBusy(true);
     try {
-      const document = await loadBrowserProject(id);
+      const document = await loadProjectAsync(id);
       if (!document) throw new Error("Project not found");
       await state.restoreProjectDocument(document);
       savedProjectRevisionRef.current = projectRevisionRef.current;
@@ -12548,7 +12643,7 @@ export default function Home() {
     const state = appRef.current;
     if (!state || running) return;
     projectNameRef.current = projectName.trim() || "Untitled animation";
-    downloadProjectDocument(state.createProjectDocument());
+    void downloadProjectDocument(state.createProjectDocument());
   };
 
   const performImportProjectRaw = async (document: SimStudioProjectDocument) => {
@@ -12571,7 +12666,7 @@ export default function Home() {
         };
       savedProjectRevisionRef.current = importedDocument.revision ?? 0;
       importedDocument.savedRevision = savedProjectRevisionRef.current;
-      await saveBrowserProject(importedDocument);
+      await saveProjectAsync(importedDocument);
       await state.restoreProjectDocument(importedDocument);
       setCurrentProjectSaved(true);
       setProjectDirty(false);
@@ -12589,7 +12684,7 @@ export default function Home() {
   const importProjectFileRaw = async (file: File) => {
     if (running || projectBusy) return;
     try {
-      const document = decodeProjectFile(await file.arrayBuffer());
+      const document = await decodeProjectAsync(await file.arrayBuffer());
       if (projectDirty) setProjectConfirmation({ kind: "import", document });
       else void performImportProject(document);
     } catch (error) {
@@ -12669,7 +12764,7 @@ export default function Home() {
     // Attempt decoding as project save file (JSON, compressed, or binary)
     try {
       const buffer = await file.arrayBuffer();
-      const document = decodeProjectFile(buffer);
+      const document = await decodeProjectAsync(buffer);
       if (document && Array.isArray(document.pieces)) {
         if (projectDirty) setProjectConfirmation({ kind: "import", document });
         else void performImportProject(document);
@@ -12744,11 +12839,11 @@ export default function Home() {
     }
     setProjectBusy(true);
     try {
-      const document = await loadBrowserProject(activeProjectIdRef.current);
+      const document = await loadProjectAsync(activeProjectIdRef.current);
       if (!document) throw new Error("Project not found");
       document.name = name;
       document.updatedAt = new Date().toISOString();
-      await saveBrowserProject(document);
+      await saveProjectAsync(document);
       suppressProjectNameDirtyRef.current = true;
       projectNameRef.current = name;
       setProjectName(name);
@@ -12772,7 +12867,7 @@ export default function Home() {
     if (!currentProjectSaved || projectBusy || running) return;
     setProjectBusy(true);
     try {
-      const document = await loadBrowserProject(activeProjectIdRef.current);
+      const document = await loadProjectAsync(activeProjectIdRef.current);
       if (!document) throw new Error("Project not found");
       const suffix = language === "es" ? " copia" : " copy";
       setDuplicateProjectDocument(document);
@@ -12806,7 +12901,7 @@ export default function Home() {
           createdAt: now,
           updatedAt: now,
         };
-      await saveBrowserProject(copy);
+      await saveProjectAsync(copy);
       setDuplicateProjectDocument(null);
       setDuplicateProjectName("");
       await refreshProjectList();
@@ -15387,20 +15482,17 @@ export default function Home() {
               setSearch(e.target.value);
               setIdResults(null);
             }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void runSearch();
+              if (e.key === "Escape") {
+                setSearch("");
+                setIdResults(null);
+              }
+            }}
             placeholder={t.search}
+            title={t.searchHelp}
           />
-        </div>
-        <div className="reference-box">
-          <b>{t.findById}</b>
-          <div>
-            <input
-              value={idQuery}
-              onChange={(e) => setIdQuery(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && void lookupById()}
-              placeholder="Ej. 32524"
-            />
-            <button onClick={() => void lookupById()}>⌕</button>
-          </div>
+          
         </div>
         <div className="category-tabs">
           {categories.map((c) => (
@@ -15419,18 +15511,6 @@ export default function Home() {
               {t.categories[c.id]}
             </button>
           ))}
-        </div>
-        <div className="reference-box">
-          <b>{t.external}</b>
-          <div>
-            <input
-              value={reference}
-              onChange={(e) => setReference(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && void addReference()}
-              placeholder="Ej. 32524"
-            />
-            <button onClick={() => void addReference()}>+</button>
-          </div>
         </div>
         <button
           type="button"

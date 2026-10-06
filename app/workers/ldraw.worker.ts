@@ -10,6 +10,7 @@ import * as THREE from "three";
 import { LDrawLoader, clearLDrawCaches } from "../vendor/LDrawLoader.js";
 import { LDrawConditionalLineMaterial } from "three/addons/materials/LDrawConditionalLineMaterial.js";
 import { flattenLDrawRenderables } from "../ldraw-geometry";
+import { typedGeometryArrays, type GeometryJson } from "../typed-json";
 import { classifySubpart } from "../ldraw-subparts";
 import { generatePartConnectors } from "../connectors";
 import * as connectorsModule from "../connectors";
@@ -102,7 +103,8 @@ async function load(message: Load) {
       // The main thread falls back to its own detection.
     }
   }
-  return { json: flat.toJSON(), missing };
+  const json = flat.toJSON() as { geometries?: GeometryJson[] };
+  return { json, missing, transfer: typedGeometryArrays(json) };
 }
 
 scope.onmessage = (event: MessageEvent<Message>) => {
@@ -125,7 +127,7 @@ scope.onmessage = (event: MessageEvent<Message>) => {
   lane.tail = lane.tail
     .then(() => load(message))
     .then(
-      (result) => scope.postMessage({ id: message.id, ...result }),
+      ({ transfer, ...result }) => scope.postMessage({ id: message.id, ...result }, transfer),
       (error: unknown) =>
         scope.postMessage({
           id: message.id,

@@ -230,7 +230,8 @@ const enTranslations = {
   stop: "■ Stop",
   simulate: "▶ Simulate",
   palette: "STUDIO PALETTE",
-  search: "Name or part number…",
+  search: "Name or part number…  (Enter = deep search)",
+  searchHelp: "Type to filter every category by name or number. An exact part number starts loading in the background. Enter searches the LDraw libraries (all variants) and adds a number that is not in the palette.",
   external: "Add external part number",
   findById: "Find part by ID",
   idLabel: "ID",
@@ -387,6 +388,7 @@ const enTranslations = {
     wheels: "Wheels",
     specials: "Specials",
     spike: "SPIKE",
+    motors: "Motors",
     imported: "Imported",
   },
 } as const;
